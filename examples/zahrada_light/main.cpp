@@ -5,6 +5,27 @@
   static UITask ui_task(display);
 #endif
 
+#ifndef LIGHT_ON_SECS
+  #define LIGHT_ON_SECS  5      // jak dlouho svetlo po LON sviti (sekundy)
+#endif
+#define LIGHT_ON_MS  ((uint32_t)LIGHT_ON_SECS * 1000UL)
+
+static uint32_t light_on_since = 0;   // millis() okamziku rozsviceni
+
+// Hlida maximalni dobu svitu: plati pro LON i pro oficialni 'io s 1'.
+static void lightTimerLoop() {
+  static bool was_on = false;
+  bool on = board.getGpio() & 1;
+  if (on && !was_on && (millis() - light_on_since) > 100) {
+    light_on_since = millis();          // rozsviceno jinak nez LON (napr. 'io s 1')
+  }
+  if (on && (millis() - light_on_since) >= LIGHT_ON_MS) {
+    board.setGpio(board.getGpio() & ~1u);   // automaticke zhasnuti
+    on = false;
+  }
+  was_on = on;
+}
+
 class MyMesh : public SensorMesh {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
@@ -15,11 +36,11 @@ public:
 protected:
   /* ========================== custom logic here ========================== */
   // Zahradni svetlo: prikazy prijate pres CLI (USB, nebo LoRa od prihlaseneho admina).
-  //   light on      -> D6 HIGH, svetlo sviti
-  //   light off     -> D6 LOW,  svetlo zhasne
-  //   light status  -> stav + napeti baterie + sila signalu posledniho prijateho paketu
-  // Velikost pismen nehraje roli ("LIGHT ON" funguje taky).
-  // Odpoved v 'reply' posle MeshCore automaticky zpet odesilateli = potvrzeni provedeni.
+  //   LON     -> svetlo sviti LIGHT_ON_SECS sekund (vychozi 5 s), pak samo zhasne
+  //              (LON pri rozsvicenem svetle odpocet znovu spusti od zacatku)
+  //   LOFF    -> svetlo hned zhasne
+  //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu
+  // Velikost pismen nehraje roli. Odpoved v 'reply' posle MeshCore automaticky zpet = potvrzeni.
 
   void onSensorDataRead() override {
     // zatim nic: zadne automaticke zpravy do site
@@ -40,19 +61,28 @@ protected:
     cmd[n] = 0;
     while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\r' || cmd[n - 1] == '\n')) cmd[--n] = 0;
 
-    if (strcmp(cmd, "light on") == 0) {
+    if (strcmp(cmd, "lon") == 0) {
+      light_on_since = millis();          // (znovu) spustit odpocet
       board.setGpio(board.getGpio() | 1);
-      strcpy(reply, "light=ON");
+      sprintf(reply, "ON %ds", LIGHT_ON_SECS);
       return true;
     }
-    if (strcmp(cmd, "light off") == 0) {
+    if (strcmp(cmd, "loff") == 0) {
       board.setGpio(board.getGpio() & ~1u);
-      strcpy(reply, "light=OFF");
+      strcpy(reply, "OFF");
       return true;
     }
-    if (strcmp(cmd, "light status") == 0 || strcmp(cmd, "light") == 0) {
-      sprintf(reply, "light=%s bat=%.2fV rssi=%d snr=%.1f",
-              (board.getGpio() & 1) ? "ON" : "OFF",
+    if (strcmp(cmd, "status") == 0) {
+      char state[16];
+      if (board.getGpio() & 1) {
+        uint32_t elapsed = millis() - light_on_since;
+        uint32_t left = elapsed < LIGHT_ON_MS ? (LIGHT_ON_MS - elapsed + 999) / 1000 : 0;
+        sprintf(state, "ON %us", (unsigned)left);
+      } else {
+        strcpy(state, "OFF");
+      }
+      sprintf(reply, "%s bat=%.2fV rssi=%d snr=%.1f",
+              state,
               board.getBattMilliVolts() / 1000.0f,
               (int)radio_driver.getLastRSSI(),
               radio_driver.getLastSNR());
@@ -171,6 +201,7 @@ void loop() {
   }
 
   the_mesh.loop();
+  lightTimerLoop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
   ui_task.loop();
