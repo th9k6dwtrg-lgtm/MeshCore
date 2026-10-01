@@ -31,6 +31,22 @@ public:
 
   uint16_t getBattMilliVolts() override;
 
+#ifdef PIN_BOARD_LIGHT
+  // zahrada: vystup na MOSFET LR7843. Bit 0 = svetlo (1 = sviti).
+  // Oficialni CLI 'io' (io / io s 1 / io r 1) i prikazy 'light ...' jdou pres tyto dve funkce.
+  uint32_t light_state = 0;
+  void setGpio(uint32_t values) override {
+    light_state = values & 1;
+    digitalWrite(PIN_BOARD_LIGHT, light_state ? HIGH : LOW);
+#ifdef OUTPUT_H0H1
+    pinMode(PIN_BOARD_LIGHT, OUTPUT_H0H1);   // silnejsi budic vystupu (vstup modulu ma optoclen)
+#else
+    pinMode(PIN_BOARD_LIGHT, OUTPUT);
+#endif
+  }
+  uint32_t getGpio() override { return light_state; }
+#endif
+
   const char* getManufacturerName() const override {
     return "Seeed Xiao-nrf52";
   }

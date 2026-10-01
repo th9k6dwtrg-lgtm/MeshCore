@@ -11,8 +11,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        env: [Xiao_nrf52_repeater_zahrada]
+        env: [Xiao_nrf52_repeater_zahrada, Xiao_nrf52_light]
     steps:
       - name: Stazeni kodu
         uses: actions/checkout@v6

@@ -30,6 +30,9 @@ void XiaoNrf52Board::initiateShutdown(uint8_t reason) {
 #endif // NRF52_POWER_MANAGEMENT
 
 void XiaoNrf52Board::begin() {
+#ifdef PIN_BOARD_LIGHT
+  setGpio(0);   // zahrada: svetlo VYPNUTE hned po startu (bezpecny stav)
+#endif
   NRF52BoardDCDC::begin();
 
   // Configure battery voltage ADC
