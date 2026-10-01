@@ -634,7 +634,9 @@ bool EnvironmentSensorManager::begin() {
 
   // Scan the I2C bus before touching any sensor library.
   bool detected[128] = {};
+#ifndef XIAO_NO_I2C   // zahrada: bez I2C sbernice nic neskenovat (MeshCore issue #2068)
   scanI2CBus(TELEM_WIRE, detected);
+#endif
 
   // Walk the sensor table and initialize only detected devices.
   _active_sensor_count = 0;

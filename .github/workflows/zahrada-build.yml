@@ -1,0 +1,42 @@
+# Zahrada: sestavi firmware pro XIAO nRF52840 + Wio-SX1262 na serverech GitHubu
+# a vysledny .uf2 ulozi jako "artifact" ke stazeni. Nic se nestahuje ani nespousti na Macu.
+name: Zahrada - build XIAO
+
+on:
+  workflow_dispatch:          # rucni spusteni tlacitkem "Run workflow"
+  push:
+    branches: [zahradni-svetlo]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [Xiao_nrf52_repeater_zahrada]
+    steps:
+      - name: Stazeni kodu
+        uses: actions/checkout@v6
+
+      - name: Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Instalace PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Kompilace ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Prevod na .uf2 (pro pretazeni na disk XIAO)
+        run: |
+          mkdir -p out
+          python3 bin/uf2conv/uf2conv.py .pio/build/${{ matrix.env }}/firmware.hex -c -o out/${{ matrix.env }}-$(git rev-parse --short HEAD).uf2 -f 0xADA52840
+          cp .pio/build/${{ matrix.env }}/firmware.zip out/${{ matrix.env }}-$(git rev-parse --short HEAD).zip 2>/dev/null || true
+          ls -la out
+
+      - name: Ulozeni vysledku ke stazeni
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.env }}
+          path: out

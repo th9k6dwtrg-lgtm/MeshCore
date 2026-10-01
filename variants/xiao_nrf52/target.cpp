@@ -19,7 +19,9 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 EnvironmentSensorManager sensors;
 
 bool radio_init() {
+#ifndef XIAO_NO_I2C   // zahrada: hledani RTC po I2C se na XIAO+Wio zasekava (MeshCore issue #2068)
   rtc_clock.begin(Wire);
+#endif
 
   return radio.std_init(&SPI);
 }

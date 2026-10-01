@@ -44,11 +44,13 @@ void XiaoNrf52Board::begin() {
   pinMode(PIN_USER_BTN, INPUT_PULLUP);
 #endif
 
+#ifndef XIAO_NO_I2C   // zahrada: D6/D7 nejsou I2C (D6 ovlada MOSFET), I2C vubec nespoustet
 #if defined(PIN_WIRE_SDA) && defined(PIN_WIRE_SCL)
   Wire.setPins(PIN_WIRE_SDA, PIN_WIRE_SCL);
 #endif
 
   Wire.begin();
+#endif
 
 #ifdef P_LORA_TX_LED
   pinMode(P_LORA_TX_LED, OUTPUT);
