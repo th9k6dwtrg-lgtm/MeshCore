@@ -95,37 +95,68 @@ int main() {
   chanMsg(m, T + 20, "Jirka: STATUS");     CHECK(g_sent.back().delay == 600 + 3*1500, "zpozdeni svetla 4");
   strcpy(m.prefs.node_name, "svetlo-1");
 
-  // --- upozorneni na baterii ---
+  // --- upozorneni na baterii (jen do kanalu) ---
+  cli(m, 0, "chan 00112233445566778899aabbccddeeff");
   g_sent.clear(); g_alerts.clear();
   auto minute = [&](uint16_t mv){ board.mv = mv; m.onSensorDataRead(); };
   minute(3600); minute(3490); minute(3490);
-  CHECK(g_alerts.empty() && g_sent.empty(), "2 mereni pod prahem jeste nic");
+  CHECK(g_sent.empty(), "2 mereni pod prahem jeste nic");
   minute(3490);
-  CHECK(g_alerts.size() == 1 && g_alerts[0] == "svetlo-1: baterie slaba 3.49 V", "3. mereni -> prime upozorneni");
   CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: baterie slaba 3.49 V", "3. mereni -> 1 zprava do kanalu");
-  m.alertsDone();
+  CHECK(g_alerts.empty(), "zadne prime zpravy (alertIf se nepouziva)");
   minute(3480); minute(3550); minute(3590); minute(3480);
-  CHECK(g_alerts.size() == 1 && g_sent.size() == 1, "kolisani pod prahem+0,1 V neopakuje upozorneni");
+  CHECK(g_sent.size() == 1, "kolisani pod prahem+0,1 V neopakuje upozorneni");
   minute(3600);   // nabito nad prah + 0,1 V -> zruseno
-  CHECK(!m.batt_low.isTriggered(), "zruseni po vzrustu o 0,1 V");
+  CHECK(!m.low_active, "zruseni po vzrustu o 0,1 V");
   minute(3490); minute(3490); minute(3490);
-  CHECK(g_alerts.size() == 2 && g_sent.size() == 2, "novy pokles -> nove upozorneni");
-  m.alertsDone();
+  CHECK(g_sent.size() == 2, "novy pokles -> nove upozorneni");
   minute(3340); minute(3340); minute(3340);
-  CHECK(g_alerts.size() == 3 && g_sent.size() == 3 && g_sent.back().text == "svetlo-1: baterie KRITICKA 3.34 V", "kriticke upozorneni");
-  m.alertsDone();
+  CHECK(g_sent.size() == 3 && g_sent.back().text == "svetlo-1: baterie KRITICKA 3.34 V", "kriticke upozorneni");
   board.ext = true; minute(3000); minute(3000); minute(3000); board.ext = false;
-  CHECK(g_alerts.size() == 3, "na USB se upozorneni nevyhodnocuje");
+  CHECK(g_sent.size() == 3, "na USB se upozorneni nevyhodnocuje");
+  // bez klice kanalu se upozorneni neztrati: odesle se, jakmile je kanal nastaven
+  minute(3700); minute(3700);   // vse zruseno
+  cli(m, 0, "chan off"); g_sent.clear();
+  minute(3490); minute(3490); minute(3490); minute(3490);
+  CHECK(g_sent.empty() && !m.low_active, "bez kanalu nic neodeslano, upozorneni ceka");
+  cli(m, 0, "chan 00112233445566778899aabbccddeeff");
+  minute(3490);
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: baterie slaba 3.49 V", "po nastaveni kanalu se upozorneni odesle");
   // ALERTTEST
-  g_sent.clear(); g_alerts.clear(); m.alertsDone(); board.mv = 3900;
-  std::string r = cli(m, 0, "alerttest");
-  CHECK(r == "OK - test: adminum v ACL + do kanalu", "ALERTTEST odpoved");
-  CHECK(g_alerts.size() == 1 && g_sent.size() == 1 && g_sent[0].text == "svetlo-1: test upozorneni, bat 3.90 V", "ALERTTEST odeslan obema cestami");
-  cli(m, 0, "alerttest"); CHECK(g_alerts.size() == 2, "ALERTTEST jde zopakovat");
-  // bez kanalu
+  g_sent.clear(); board.mv = 3900;
+  CHECK(cli(m, 0, "alerttest") == "OK - test upozorneni odeslan do kanalu", "ALERTTEST odpoved");
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: test upozorneni, bat 3.90 V", "ALERTTEST zprava do kanalu");
   cli(m, 0, "chan off");
-  CHECK(cli(m, 0, "alerttest") == "OK - test: adminum v ACL (kanal neni nastaven)", "ALERTTEST bez kanalu");
+  CHECK(cli(m, 0, "alerttest") == "Err - kanal neni nastaven", "ALERTTEST bez kanalu");
 
+  // --- 5 lidi v kanalu s ruzne jdoucimi hodinami ---
+  cli(m, 0, "chan 00112233445566778899aabbccddeeff");
+  {
+    const char* lide[5] = {"Jirka", "Jana", "Petr", "Eva", "Tomas"};
+    int offs[5] = {0, -40, +25, -90, +5};      // rozdil hodin telefonu (s)
+    uint32_t B = 1800100000;
+    int ok = 0;
+    for (int kolo = 0; kolo < 3; kolo++) {
+      for (int p = 0; p < 5; p++) {
+        board.setGpio(0);
+        char msg[48]; snprintf(msg, sizeof(msg), "%s: LON", lide[p]);
+        chanMsg(m, B + kolo * 10 + p + offs[p], msg);
+        if (board.light_state == 1) ok++;
+      }
+    }
+    CHECK(ok == 15, "5 lidi s ruznymi hodinami: vsech 15 prikazu provedeno");
+    board.setGpio(0);
+    chanMsg(m, B + 20 + 1 + offs[1], "Jana: LON");   // presne prehrani posledni Janiny zpravy
+    CHECK(board.light_state == 0, "prehrani zpravy jednoho z 5 lidi odmitnuto");
+  }
+  // hodiny se srovnaji i podle beznych zprav a prikazu pro jina svetla
+  m.rtc.t = 1715770351;                       // jako po restartu (rok 2024)
+  chanMsg(m, 1800200000, "Jana: ahoj, jdu na zahradu");
+  CHECK(m.rtc.t == 1800200000, "hodiny srovnany podle bezne zpravy v kanalu");
+  chanMsg(m, 1800200100, "Petr: LON 3");
+  CHECK(m.rtc.t == 1800200100, "hodiny srovnany podle prikazu pro jine svetlo");
+  chanMsg(m, 1800000000, "Eva: ahoj");
+  CHECK(m.rtc.t == 1800200100, "hodiny nejdou dozadu");
 
   // --- doplnkove okrajove pripady ---
   strcpy(m.prefs.node_name, "svetlo-1"); board.setGpio(0); light_timer_armed = false;

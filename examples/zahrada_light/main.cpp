@@ -85,7 +85,7 @@ protected:
   //   LOFF    -> svetlo hned zhasne
   //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
   //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
-  //   ALERTTEST -> (jen USB) posle zkusebni upozorneni adminum (overeni doruceni)
+  //   ALERTTEST -> (jen USB) posle zkusebni upozorneni do kanalu
   //
   // Dve cesty, jak prikaz poslat:
   //  1) CLI (USB, nebo LoRa od prihlaseneho admina) - jen tomuto uzlu.
@@ -101,7 +101,7 @@ protected:
 
   // Ochrana proti prehrani v kanalu: od kazdeho odesilatele (jmeno v zasifrovane zprave) jen novejsi
   // casove razitko. Zvlast pro kazdeho, aby nevadil rozdil hodin mezi telefony (napr. 2 lide v kanalu).
-  #define CHAN_MAX_SENDERS  8
+  #define CHAN_MAX_SENDERS  16   // az 16 ruznych lidi (jmen) v kanalu
   struct ChanSender { uint32_t name_hash; uint32_t last_ts; };
   ChanSender chan_senders[CHAN_MAX_SENDERS];
   uint8_t chan_senders_n = 0, chan_senders_next = 0;
@@ -127,12 +127,23 @@ protected:
     return true;
   }
 
-  // Upozorneni na slabou baterii:
-  //  - oficialni mechanismus SensorMesh (alertIf): primo adminum v ACL, s potvrzenim a opakovanim
-  //  - navic 1 zprava do soukromeho kanalu (vidi vsichni v kanalu; bez potvrzeni doruceni)
+  // Upozorneni na slabou baterii: 1 zprava do soukromeho kanalu (vidi vsichni clenove kanalu).
+  // (Prime zpravy adminum aplikace u kontaktu typu Sensor nezobrazuje, proto se nepouzivaji.)
   // Jedna zprava pri prekroceni prahu, dalsi az po nabiti nad prah + 0,1 V a novem poklesu.
-  Trigger batt_low, batt_crit, test_alert;
+  bool low_active = false, crit_active = false;
   uint8_t low_cnt = 0, crit_cnt = 0;
+
+  // vyhodnoceni jednoho prahu; zprava se odesle pri vzniku (kdyz se nepodari, zkusi se za minutu znovu)
+  void battLevel(bool& active, uint8_t cnt, uint32_t mv, uint32_t thr_mv, const char* what) {
+    bool now = cnt >= BATT_DEBOUNCE || (active && mv < thr_mv + BATT_HYST_MV);
+    if (now && !active) {
+      char body[48];
+      snprintf(body, sizeof(body), "baterie %s %.2f V", what, mv / 1000.0f);
+      active = sendChannelText(body);
+    } else {
+      active = now;
+    }
+  }
 
   void onSensorDataRead() override {   // vola SensorMesh 1x za minutu
 #ifdef NRF52_POWER_MANAGEMENT
@@ -145,20 +156,8 @@ protected:
     low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
     crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
 
-    char body[48], text[96];
-    bool was_low = batt_low.isTriggered(), was_crit = batt_crit.isTriggered();
-
-    snprintf(body, sizeof(body), "baterie slaba %.2f V", mv / 1000.0f);
-    snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
-    alertIf(low_cnt >= BATT_DEBOUNCE || (batt_low.isTriggered() && mv < BATT_LOW_MV + BATT_HYST_MV),
-            batt_low, HIGH_PRI_ALERT, text);
-    if (!was_low && batt_low.isTriggered()) sendChannelText(body);     // 1x do kanalu pri vzniku
-
-    snprintf(body, sizeof(body), "baterie KRITICKA %.2f V", mv / 1000.0f);
-    snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
-    alertIf(crit_cnt >= BATT_DEBOUNCE || (batt_crit.isTriggered() && mv < BATT_CRIT_MV + BATT_HYST_MV),
-            batt_crit, HIGH_PRI_ALERT, text);
-    if (!was_crit && batt_crit.isTriggered()) sendChannelText(body);
+    battLevel(low_active,  low_cnt,  mv, BATT_LOW_MV,  "slaba");
+    battLevel(crit_active, crit_cnt, mv, BATT_CRIT_MV, "KRITICKA");
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
@@ -264,15 +263,11 @@ protected:
 
     if (execLight(cmd, reply)) return true;
 
-    // test doruceni upozorneni: posle zkusebni upozorneni stejnou cestou jako slaba baterie (jen pres USB)
+    // test upozorneni: posle zkusebni zpravu do kanalu stejnou cestou jako slaba baterie (jen pres USB)
     if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
-      char body[48], text[96];
+      char body[48];
       snprintf(body, sizeof(body), "test upozorneni, bat %.2f V", board.getBattMilliVolts() / 1000.0f);
-      snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
-      alertIf(false, test_alert, HIGH_PRI_ALERT, text);   // zrusit predchozi test
-      alertIf(true,  test_alert, HIGH_PRI_ALERT, text);
-      bool ch = sendChannelText(body);
-      sprintf(reply, "OK - test: adminum v ACL%s", ch ? " + do kanalu" : " (kanal neni nastaven)");
+      strcpy(reply, sendChannelText(body) ? "OK - test upozorneni odeslan do kanalu" : "Err - kanal neni nastaven");
       return true;
     }
 
@@ -330,6 +325,10 @@ protected:
     uint32_t ts;
     memcpy(&ts, data, 4);
 
+    // hodiny uzlu po startu nejdou spravne -> srovnat podle kazde overene zpravy v kanalu (jen dopredu),
+    // at maji upozorneni spravne datum co nejdriv po restartu
+    if (ts > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(ts);
+
     // text zpravy ve tvaru "<odesilatel>: <text>" -> vzit cast za ": ", prevest na mala pismena
     char text[128];
     size_t tl = len - 5;
@@ -363,9 +362,6 @@ protected:
 
     // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
     if (!chanReplayOk(nameHash(text, sender_len), ts)) return;
-
-    // hodiny uzlu po startu nejdou spravne -> srovnat podle overene zpravy z telefonu (jen dopredu)
-    if (ts > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(ts);
 
     char result[96];
     if (!execLight(word, result)) return;
