@@ -98,8 +98,9 @@ protected:
   bool light_chan_ok = false;
   uint32_t light_chan_last_ts = 0;   // ochrana proti prehrani: prijmout jen novejsi casove razitko
 
-  // Upozorneni na slabou baterii: oficialni mechanismus SensorMesh (alertIf).
-  // Zprava jde PRIMO adminum, kteri se k uzlu aspon jednou prihlasili (jsou v ACL), ne do site.
+  // Upozorneni na slabou baterii:
+  //  - oficialni mechanismus SensorMesh (alertIf): primo adminum v ACL, s potvrzenim a opakovanim
+  //  - navic 1 zprava do soukromeho kanalu (vidi vsichni v kanalu; bez potvrzeni doruceni)
   // Jedna zprava pri prekroceni prahu, dalsi az po nabiti nad prah + 0,1 V a novem poklesu.
   Trigger batt_low, batt_crit, test_alert;
   uint8_t low_cnt = 0, crit_cnt = 0;
@@ -115,13 +116,20 @@ protected:
     low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
     crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
 
-    char text[64];
-    snprintf(text, sizeof(text), "%s: baterie slaba %.2f V", getNodePrefs()->node_name, mv / 1000.0f);
+    char body[48], text[80];
+    bool was_low = batt_low.isTriggered(), was_crit = batt_crit.isTriggered();
+
+    snprintf(body, sizeof(body), "baterie slaba %.2f V", mv / 1000.0f);
+    snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
     alertIf(low_cnt >= BATT_DEBOUNCE || (batt_low.isTriggered() && mv < BATT_LOW_MV + BATT_HYST_MV),
             batt_low, HIGH_PRI_ALERT, text);
-    snprintf(text, sizeof(text), "%s: baterie KRITICKA %.2f V", getNodePrefs()->node_name, mv / 1000.0f);
+    if (!was_low && batt_low.isTriggered()) sendChannelText(body);     // 1x do kanalu pri vzniku
+
+    snprintf(body, sizeof(body), "baterie KRITICKA %.2f V", mv / 1000.0f);
+    snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
     alertIf(crit_cnt >= BATT_DEBOUNCE || (batt_crit.isTriggered() && mv < BATT_CRIT_MV + BATT_HYST_MV),
             batt_crit, HIGH_PRI_ALERT, text);
+    if (!was_crit && batt_crit.isTriggered()) sendChannelText(body);
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
@@ -229,11 +237,13 @@ protected:
 
     // test doruceni upozorneni: posle zkusebni upozorneni stejnou cestou jako slaba baterie (jen pres USB)
     if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
-      char text[64];
-      snprintf(text, sizeof(text), "%s: test upozorneni, bat %.2f V", getNodePrefs()->node_name, board.getBattMilliVolts() / 1000.0f);
+      char body[48], text[80];
+      snprintf(body, sizeof(body), "test upozorneni, bat %.2f V", board.getBattMilliVolts() / 1000.0f);
+      snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
       alertIf(false, test_alert, HIGH_PRI_ALERT, text);   // zrusit predchozi test
       alertIf(true,  test_alert, HIGH_PRI_ALERT, text);
-      strcpy(reply, "OK - test upozorneni zarazen k odeslani adminum v ACL");
+      bool ch = sendChannelText(body);
+      sprintf(reply, "OK - test: adminum v ACL%s", ch ? " + do kanalu" : " (kanal neni nastaven)");
       return true;
     }
 
@@ -331,19 +341,26 @@ protected:
     char result[96];
     if (!execLight(word, result)) return;
 
-    // odpoved do kanalu "<jmeno>: <vysledek>", kazde svetlo se zpozdenim podle sveho cisla (at se nesrazi)
+    sendChannelText(result);
+  }
+
+  // zprava do soukromeho kanalu ve tvaru "<jmeno>: <text>" (stejny format jako zprava z aplikace);
+  // kazde svetlo se zpozdenim podle sveho cisla, at se zpravy vice svetel nesrazi
+  bool sendChannelText(const char* text) {
+    if (!light_chan_ok) return false;
     uint8_t out[5 + 140];
     uint32_t now = getRTCClock()->getCurrentTimeUnique();
     memcpy(out, &now, 4);
     out[4] = 0;   // TXT_TYPE_PLAIN
-    int ol = snprintf((char*)&out[5], sizeof(out) - 5, "%s: %s", getNodePrefs()->node_name, result);
-    if (ol < 0) return;
+    int ol = snprintf((char*)&out[5], sizeof(out) - 5, "%s: %s", getNodePrefs()->node_name, text);
+    if (ol < 0) return false;
     if (ol > (int)sizeof(out) - 6) ol = sizeof(out) - 6;
-    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, channel, out, 5 + ol);
-    if (pkt) {
-      uint32_t delay = 600 + (uint32_t)((me > 0 ? me - 1 : 4) % 8) * 1500 + getRNG()->nextInt(0, 400);
-      sendFlood(pkt, delay, getNodePrefs()->path_hash_mode + 1);
-    }
+    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, light_chan, out, 5 + ol);
+    if (!pkt) return false;
+    int me = lightNumber();
+    uint32_t delay = 600 + (uint32_t)((me > 0 ? me - 1 : 4) % 8) * 1500 + getRNG()->nextInt(0, 400);
+    sendFlood(pkt, delay, getNodePrefs()->path_hash_mode + 1);
+    return true;
   }
   /* ======================================================================= */
 };
