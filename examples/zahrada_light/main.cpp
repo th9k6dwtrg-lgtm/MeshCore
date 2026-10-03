@@ -26,6 +26,49 @@ static void lightTimerLoop() {
   was_on = on;
 }
 
+// ---------- hlidaci obvod (watchdog) nRF52 ----------
+// Kdyz se firmware zasekne a hlavni smycka ho neobnovi do WDT_TIMEOUT_SECS, cip se sam restartuje.
+// Po restartu je svetlo vzdy zhasnute (D6 = LOW hned po startu).
+// Pozn.: jednou spusteny WDT nejde zastavit a bezi i po softwarovem resetu (napr. do zavadece).
+// Zavadec Adafruit ho neobnovuje, proto dlouha doba (prijde-li reset v zavadeci, staci zopakovat).
+#ifndef WDT_TIMEOUT_SECS
+  #define WDT_TIMEOUT_SECS  120
+#endif
+#ifdef NRF52_PLATFORM
+static void wdtStart() {
+  if ((NRF_WDT->RUNSTATUS & 1) == 0) {     // jeste nebezi (po vypnuti napajeni / resetu pinem)
+    NRF_WDT->CONFIG = (WDT_CONFIG_HALT_Pause << WDT_CONFIG_HALT_Pos) | (WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos);
+    NRF_WDT->CRV = (uint32_t)WDT_TIMEOUT_SECS * 32768UL;
+    NRF_WDT->RREN = WDT_RREN_RR0_Msk;
+    NRF_WDT->TASKS_START = 1;
+  }
+  NRF_WDT->RR[0] = WDT_RR_RR_Reload;
+}
+static inline void wdtFeed() { NRF_WDT->RR[0] = WDT_RR_RR_Reload; }
+#else
+static void wdtStart() { }
+static inline void wdtFeed() { }
+#endif
+
+// ---------- doba behu od startu (64bit, nepretece po 49 dnech) ----------
+static uint64_t uptime_ms = 0;
+static uint32_t uptime_last = 0;
+static void uptimeLoop() {
+  uint32_t now = millis();
+  uptime_ms += (uint32_t)(now - uptime_last);
+  uptime_last = now;
+}
+
+// ---------- upozorneni na slabou baterii ----------
+#ifndef BATT_LOW_MV
+  #define BATT_LOW_MV     3500   // "baterie slaba"
+#endif
+#ifndef BATT_CRIT_MV
+  #define BATT_CRIT_MV    3350   // "baterie kriticka" (pod 3,3 V uz uzel po restartu nenabehne)
+#endif
+#define BATT_HYST_MV       100   // zruseni upozorneni az po vzrustu o 0,1 V nad prah
+#define BATT_DEBOUNCE        3   // prah musi byt podkrocen 3x po sobe (mereni 1x za minutu)
+
 class MyMesh : public SensorMesh {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
@@ -38,7 +81,8 @@ protected:
   // Zahradni svetlo. Prikazy (velikost pismen nehraje roli):
   //   LON     -> svetlo sviti LIGHT_ON_SECS sekund (vychozi 5 s), pak samo zhasne
   //   LOFF    -> svetlo hned zhasne
-  //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu
+  //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
+  //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
   //
   // Dve cesty, jak prikaz poslat:
   //  1) CLI (USB, nebo LoRa od prihlaseneho admina) - jen tomuto uzlu.
@@ -53,8 +97,30 @@ protected:
   bool light_chan_ok = false;
   uint32_t light_chan_last_ts = 0;   // ochrana proti prehrani: prijmout jen novejsi casove razitko
 
-  void onSensorDataRead() override {
-    // zatim nic: zadne automaticke zpravy do site
+  // Upozorneni na slabou baterii: oficialni mechanismus SensorMesh (alertIf).
+  // Zprava jde PRIMO adminum, kteri se k uzlu aspon jednou prihlasili (jsou v ACL), ne do site.
+  // Jedna zprava pri prekroceni prahu, dalsi az po nabiti nad prah + 0,1 V a novem poklesu.
+  Trigger batt_low, batt_crit;
+  uint8_t low_cnt = 0, crit_cnt = 0;
+
+  void onSensorDataRead() override {   // vola SensorMesh 1x za minutu
+#ifdef NRF52_POWER_MANAGEMENT
+    if (board.isExternalPowered()) { low_cnt = crit_cnt = 0; return; }   // na USB napeti baterie nevypovida
+#endif
+    uint32_t mv = 0;
+    for (int i = 0; i < 4; i++) mv += board.getBattMilliVolts();
+    mv /= 4;
+
+    low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
+    crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
+
+    char text[64];
+    snprintf(text, sizeof(text), "%s: baterie slaba %.2f V", getNodePrefs()->node_name, mv / 1000.0f);
+    alertIf(low_cnt >= BATT_DEBOUNCE || (batt_low.isTriggered() && mv < BATT_LOW_MV + BATT_HYST_MV),
+            batt_low, HIGH_PRI_ALERT, text);
+    snprintf(text, sizeof(text), "%s: baterie KRITICKA %.2f V", getNodePrefs()->node_name, mv / 1000.0f);
+    alertIf(crit_cnt >= BATT_DEBOUNCE || (batt_crit.isTriggered() && mv < BATT_CRIT_MV + BATT_HYST_MV),
+            batt_crit, HIGH_PRI_ALERT, text);
   }
 
   int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
@@ -91,11 +157,13 @@ protected:
       } else {
         strcpy(state, "OFF");
       }
-      sprintf(reply, "%s bat=%.2fV rssi=%d snr=%.1f",
+      uint32_t up_min = (uint32_t)(uptime_ms / 60000ULL);
+      sprintf(reply, "%s bat=%.2fV rssi=%d snr=%.1f up=%ud%02uh%02um",
               state,
               board.getBattMilliVolts() / 1000.0f,
               (int)radio_driver.getLastRSSI(),
-              radio_driver.getLastSNR());
+              radio_driver.getLastSNR(),
+              (unsigned)(up_min / 1440), (unsigned)((up_min / 60) % 24), (unsigned)(up_min % 60));
       return true;
     }
     return false;
@@ -153,7 +221,19 @@ protected:
     cmd[n] = 0;
     while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\r' || cmd[n - 1] == '\n')) cmd[--n] = 0;
 
+    // hodiny uzlu po startu nejdou spravne -> srovnat podle prikazu od admina (jen dopredu)
+    if (sender_timestamp > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(sender_timestamp);
+
     if (execLight(cmd, reply)) return true;
+
+    // test hlidaciho obvodu: zamerne zasekne firmware, do WDT_TIMEOUT_SECS se uzel sam restartuje
+    // (jen pres USB, ne na dalku)
+    if (sender_timestamp == 0 && strcmp(cmd, "wdttest") == 0) {
+      board.setGpio(0);
+      Serial.println("  -> WDT test: firmware zaseknut, cekam na restart...");
+      Serial.flush();
+      while (1) { }
+    }
 
     if (strcmp(cmd, "chan") == 0) {
       if (light_chan_ok) sprintf(reply, "chan ON hash=%02X", light_chan.hash[0]);
@@ -276,6 +356,7 @@ void setup() {
   delay(1000);
 
   board.begin();
+  wdtStart();          // hlidaci obvod: od ted musi hlavni smycka bezet
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
@@ -341,6 +422,8 @@ void setup() {
 }
 
 void loop() {
+  wdtFeed();
+  uptimeLoop();
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();
