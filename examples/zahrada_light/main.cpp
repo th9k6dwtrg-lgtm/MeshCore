@@ -83,6 +83,7 @@ protected:
   //   LOFF    -> svetlo hned zhasne
   //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
   //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
+  //   ALERTTEST -> (jen USB) posle zkusebni upozorneni adminum (overeni doruceni)
   //
   // Dve cesty, jak prikaz poslat:
   //  1) CLI (USB, nebo LoRa od prihlaseneho admina) - jen tomuto uzlu.
@@ -100,7 +101,7 @@ protected:
   // Upozorneni na slabou baterii: oficialni mechanismus SensorMesh (alertIf).
   // Zprava jde PRIMO adminum, kteri se k uzlu aspon jednou prihlasili (jsou v ACL), ne do site.
   // Jedna zprava pri prekroceni prahu, dalsi az po nabiti nad prah + 0,1 V a novem poklesu.
-  Trigger batt_low, batt_crit;
+  Trigger batt_low, batt_crit, test_alert;
   uint8_t low_cnt = 0, crit_cnt = 0;
 
   void onSensorDataRead() override {   // vola SensorMesh 1x za minutu
@@ -225,6 +226,16 @@ protected:
     if (sender_timestamp > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(sender_timestamp);
 
     if (execLight(cmd, reply)) return true;
+
+    // test doruceni upozorneni: posle zkusebni upozorneni stejnou cestou jako slaba baterie (jen pres USB)
+    if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
+      char text[64];
+      snprintf(text, sizeof(text), "%s: test upozorneni, bat %.2f V", getNodePrefs()->node_name, board.getBattMilliVolts() / 1000.0f);
+      alertIf(false, test_alert, HIGH_PRI_ALERT, text);   // zrusit predchozi test
+      alertIf(true,  test_alert, HIGH_PRI_ALERT, text);
+      strcpy(reply, "OK - test upozorneni zarazen k odeslani adminum v ACL");
+      return true;
+    }
 
     // test hlidaciho obvodu: zamerne zasekne firmware, do WDT_TIMEOUT_SECS se uzel sam restartuje
     // (jen pres USB, ne na dalku)
