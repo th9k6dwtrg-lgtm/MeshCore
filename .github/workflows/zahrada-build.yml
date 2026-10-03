@@ -18,6 +18,9 @@ jobs:
       - name: Stazeni kodu
         uses: actions/checkout@v6
 
+      - name: Logicke testy (PC, bez hardwaru)
+        run: ./zahrada_test/run.sh
+
       - name: Python
         uses: actions/setup-python@v6
         with:

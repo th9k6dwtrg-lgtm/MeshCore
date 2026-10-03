@@ -10,20 +10,22 @@
 #endif
 #define LIGHT_ON_MS  ((uint32_t)LIGHT_ON_SECS * 1000UL)
 
-static uint32_t light_on_since = 0;   // millis() okamziku rozsviceni
+static uint32_t light_on_since = 0;      // millis() okamziku rozsviceni
+static bool light_timer_armed = false;   // odpocet do zhasnuti bezi
+
+static void lightTimerStart() {
+  light_on_since = millis();
+  light_timer_armed = true;
+}
 
 // Hlida maximalni dobu svitu: plati pro LON i pro oficialni 'io s 1'.
 static void lightTimerLoop() {
-  static bool was_on = false;
-  bool on = board.getGpio() & 1;
-  if (on && !was_on && (millis() - light_on_since) > 100) {
-    light_on_since = millis();          // rozsviceno jinak nez LON (napr. 'io s 1')
+  if ((board.getGpio() & 1) == 0) { light_timer_armed = false; return; }
+  if (!light_timer_armed) lightTimerStart();     // rozsviceno jinak nez LON (napr. 'io s 1')
+  if ((uint32_t)(millis() - light_on_since) >= LIGHT_ON_MS) {
+    board.setGpio(board.getGpio() & ~1u);        // automaticke zhasnuti
+    light_timer_armed = false;
   }
-  if (on && (millis() - light_on_since) >= LIGHT_ON_MS) {
-    board.setGpio(board.getGpio() & ~1u);   // automaticke zhasnuti
-    on = false;
-  }
-  was_on = on;
 }
 
 // ---------- hlidaci obvod (watchdog) nRF52 ----------
@@ -96,7 +98,34 @@ protected:
 
   mesh::GroupChannel light_chan;
   bool light_chan_ok = false;
-  uint32_t light_chan_last_ts = 0;   // ochrana proti prehrani: prijmout jen novejsi casove razitko
+
+  // Ochrana proti prehrani v kanalu: od kazdeho odesilatele (jmeno v zasifrovane zprave) jen novejsi
+  // casove razitko. Zvlast pro kazdeho, aby nevadil rozdil hodin mezi telefony (napr. 2 lide v kanalu).
+  #define CHAN_MAX_SENDERS  8
+  struct ChanSender { uint32_t name_hash; uint32_t last_ts; };
+  ChanSender chan_senders[CHAN_MAX_SENDERS];
+  uint8_t chan_senders_n = 0, chan_senders_next = 0;
+
+  static uint32_t nameHash(const char* s, size_t n) {   // FNV-1a
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+    return h;
+  }
+  bool chanReplayOk(uint32_t name_hash, uint32_t ts) {
+    for (int i = 0; i < chan_senders_n; i++) {
+      if (chan_senders[i].name_hash == name_hash) {
+        if (ts <= chan_senders[i].last_ts) return false;   // stejna nebo starsi zprava = prehrani
+        chan_senders[i].last_ts = ts;
+        return true;
+      }
+    }
+    int idx;   // novy odesilatel
+    if (chan_senders_n < CHAN_MAX_SENDERS) idx = chan_senders_n++;
+    else { idx = chan_senders_next; chan_senders_next = (chan_senders_next + 1) % CHAN_MAX_SENDERS; }
+    chan_senders[idx].name_hash = name_hash;
+    chan_senders[idx].last_ts = ts;
+    return true;
+  }
 
   // Upozorneni na slabou baterii:
   //  - oficialni mechanismus SensorMesh (alertIf): primo adminum v ACL, s potvrzenim a opakovanim
@@ -116,7 +145,7 @@ protected:
     low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
     crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
 
-    char body[48], text[80];
+    char body[48], text[96];
     bool was_low = batt_low.isTriggered(), was_crit = batt_crit.isTriggered();
 
     snprintf(body, sizeof(body), "baterie slaba %.2f V", mv / 1000.0f);
@@ -147,7 +176,7 @@ protected:
   // provede LON / LOFF / STATUS; cmd uz je malymi pismeny a bez parametru
   bool execLight(const char* cmd, char* reply) {
     if (strcmp(cmd, "lon") == 0) {
-      light_on_since = millis();          // (znovu) spustit odpocet
+      lightTimerStart();                  // (znovu) spustit odpocet
       board.setGpio(board.getGpio() | 1);
       sprintf(reply, "ON %ds", LIGHT_ON_SECS);
       return true;
@@ -188,7 +217,7 @@ protected:
     int klen = (memcmp(&secret32[16], zeroes, 16) == 0) ? 16 : 32;
     mesh::Utils::sha256(light_chan.hash, sizeof(light_chan.hash), light_chan.secret, klen);
     light_chan_ok = true;
-    light_chan_last_ts = 0;
+    chan_senders_n = chan_senders_next = 0;
   }
 
 public:
@@ -237,7 +266,7 @@ protected:
 
     // test doruceni upozorneni: posle zkusebni upozorneni stejnou cestou jako slaba baterie (jen pres USB)
     if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
-      char body[48], text[80];
+      char body[48], text[96];
       snprintf(body, sizeof(body), "test upozorneni, bat %.2f V", board.getBattMilliVolts() / 1000.0f);
       snprintf(text, sizeof(text), "%s: %s", getNodePrefs()->node_name, body);
       alertIf(false, test_alert, HIGH_PRI_ALERT, text);   // zrusit predchozi test
@@ -306,8 +335,9 @@ protected:
     size_t tl = len - 5;
     memcpy(text, &data[5], tl);
     text[tl] = 0;
-    const char* body = strstr(text, ": ");
-    body = body ? body + 2 : text;
+    const char* sep = strstr(text, ": ");
+    size_t sender_len = sep ? (size_t)(sep - text) : 0;
+    const char* body = sep ? sep + 2 : text;
     char cmd[64];
     int n = 0;
     while (body[n] && n < (int)sizeof(cmd) - 1) { cmd[n] = tolower((unsigned char)body[n]); n++; }
@@ -331,9 +361,8 @@ protected:
     }
     if (!for_me) return;
 
-    // ochrana proti prehrani: kazdy dalsi prikaz musi mit novejsi cas nez predchozi
-    if (ts <= light_chan_last_ts) return;
-    light_chan_last_ts = ts;
+    // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
+    if (!chanReplayOk(nameHash(text, sender_len), ts)) return;
 
     // hodiny uzlu po startu nejdou spravne -> srovnat podle overene zpravy z telefonu (jen dopredu)
     if (ts > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(ts);

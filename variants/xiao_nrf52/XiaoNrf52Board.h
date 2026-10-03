@@ -33,7 +33,7 @@ public:
 
 #ifdef PIN_BOARD_LIGHT
   // zahrada: vystup na MOSFET LR7843. Bit 0 = svetlo (1 = sviti).
-  // Oficialni CLI 'io' (io / io s 1 / io r 1) i prikazy 'light ...' jdou pres tyto dve funkce.
+  // Oficialni CLI 'io' (io / io s 1 / io r 1) i prikazy LON/LOFF jdou pres tyto dve funkce.
   uint32_t light_state = 0;
   void setGpio(uint32_t values) override {
     light_state = values & 1;
@@ -52,6 +52,9 @@ public:
   }
 
   void powerOff() override {
+#ifdef PIN_BOARD_LIGHT
+    setGpio(0);   // zahrada: pred vypnutim zhasnout (vystup by jinak zustal sepnuty i ve vypnutem stavu)
+#endif
     // set led on and wait for button release before poweroff
     digitalWrite(PIN_LED, LOW);
 #ifdef PIN_USER_BTN

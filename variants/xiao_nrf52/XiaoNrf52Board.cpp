@@ -15,6 +15,9 @@ const PowerMgtConfig power_config = {
 };
 
 void XiaoNrf52Board::initiateShutdown(uint8_t reason) {
+#ifdef PIN_BOARD_LIGHT
+  setGpio(0);   // zahrada: pred vypnutim zhasnout
+#endif
   bool enable_lpcomp = (reason == SHUTDOWN_REASON_LOW_VOLTAGE ||
                         reason == SHUTDOWN_REASON_BOOT_PROTECT);
 
