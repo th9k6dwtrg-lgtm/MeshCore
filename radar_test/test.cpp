@@ -27,6 +27,7 @@ int main() {
 
   // --- start uzlu s ulozenym RADAR ON + SVETLO ON a clovekem pred radarem ---
   {
+    const uint32_t W = RADAR_STARTUP_MS;           // doba ustalovani (testy bezi pro 30 s i 300 s)
     MyMesh b(mb, mr, mc, rg, rc, mt);
     strcpy(b.prefs.node_name, "dum-radar");
     b.radar_on = true; b.light_on = true;          // jako po loadRadarState()
@@ -35,16 +36,32 @@ int main() {
     g_millis = 500; b.radarLoop(true); lightTimerLoop();
     CHECK(g_sent.empty() && board.light_state == 0, "start s OT2=HIGH: zadny poplach ani svetlo");
     g_millis = 5000; b.radarLoop(false); b.radarLoop(true); lightTimerLoop();
-    CHECK(g_sent.empty() && board.light_state == 0, "behem ustalovani (30 s) se pohyb nevyhodnocuje");
+    CHECK(g_sent.empty() && board.light_state == 0, "behem ustalovani se pohyb nevyhodnocuje");
     CHECK(b.ot2_edges == 1, "hrany OT2 se pocitaji i behem ustalovani");
     b.radarLoop(false);
-    g_millis = 30500; b.radarLoop(true); lightTimerLoop();
-    CHECK(g_sent.size() == 1 && board.light_state == 1, "po 30 s uz pohyb rozsviti a posle zpravu");
+    if (W > 60000) {
+      g_millis = 500 + W - 60001; b.radarLoop(false);
+      CHECK(g_sent.empty(), "pred 'pripraven za 60 s' nic");
+      g_millis = 500 + W - 60000; b.radarLoop(false);
+      CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: radar pripraven za 60 s (RADAR ON)", "60 s pred koncem ustalovani zprava");
+      b.radarLoop(true); b.radarLoop(false);
+      CHECK(g_sent.size() == 1 && board.light_state == 0, "zprava 'za 60 s' jen jednou, pohyb porad ignorovan");
+      g_sent.clear();
+    }
+    g_millis = 500 + W - 1; b.radarLoop(false);
+    CHECK(g_sent.empty(), "tesne pred koncem ustalovani nic");
+    g_millis = 500 + W; b.radarLoop(false);
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: radar pripraven (RADAR ON, SVETLO ON)", "konec ustalovani -> zprava pripraven");
+    b.radarLoop(false);
+    CHECK(g_sent.size() == 1, "zprava 'pripraven' jen jednou");
+    g_millis = 500 + W + 500; b.radarLoop(true); lightTimerLoop();
+    CHECK(g_sent.size() == 2 && g_sent[1].text.rfind("dum-radar: POHYB!", 0) == 0 && board.light_state == 1, "po ustaleni pohyb rozsviti a posle zpravu");
     board.setGpio(0); g_sent.clear();
   }
   g_millis = 1000;
   m.radarLoop(false);                    // prvni cteni OT2 (zacatek ustalovani) ...
-  m.radar_start = g_millis - 100000;     // ... ustaleni uz probehlo
+  m.radar_start = g_millis - RADAR_STARTUP_MS - 100000;   // ... ustaleni uz probehlo
+  m.ready_warn_sent = m.ready_sent = true;                // a zpravy o pripravenosti odesly
 
   // --- CLI ---
   CHECK(cli(m, 0, "chan") == "chan OFF", "chan bez klice");

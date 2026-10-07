@@ -24,6 +24,7 @@
   #define RADAR_STARTUP_SECS  30  // po startu uzlu (a radaru) se pohyb nevyhodnocuje: radar se ustaluje
 #endif
 #define RADAR_STARTUP_MS  ((uint32_t)RADAR_STARTUP_SECS * 1000UL)
+#define RADAR_READY_WARN_SECS  60 // zprava "pripraven za 60 s" (jen kdyz je ustalovani delsi nez 60 s)
 
 #ifndef REPLY_ALL_DELAY_MS
   #define REPLY_ALL_DELAY_MS  6600  // odpoved na prikaz pro vsechny (STATUS): az po zahradnich svetlech 1-4
@@ -119,6 +120,8 @@ protected:
   uint32_t ot2_edges = 0;         // nabezne hrany OT2 od startu, i pri RADAR OFF (pro test radaru)
   bool radar_seen = false;        // OT2 uz byl aspon jednou precten
   uint32_t radar_start = 0;       // millis() prvniho cteni OT2 (zacatek ustalovani)
+  bool ready_warn_sent = false;   // zprava "pripraven za 60 s" uz odesla
+  bool ready_sent = false;        // zprava "pripraven" uz odesla
   uint32_t motion_count = 0;      // pocet pohybu od zapnuti hlidani
   uint32_t motion_last = 0;       // millis() posledniho pohybu
   bool alarm_sent_once = false;
@@ -215,7 +218,23 @@ public:
     bool rising = motion && !motion_prev;    // novy pohyb = nabezna hrana OT2
     motion_prev = motion;
     if (rising) ot2_edges++;
-    bool settling = (uint32_t)(millis() - radar_start) < RADAR_STARTUP_MS;
+    uint32_t since_start = (uint32_t)(millis() - radar_start);
+    bool settling = since_start < RADAR_STARTUP_MS;
+
+    // po startu do kanalu: 60 s pred koncem ustalovani a pri jeho konci (jednou, at je jasne, kdy radar hlida)
+    if (!ready_warn_sent && RADAR_STARTUP_SECS > RADAR_READY_WARN_SECS &&
+        since_start >= RADAR_STARTUP_MS - RADAR_READY_WARN_SECS * 1000UL) {
+      char body[48];
+      snprintf(body, sizeof(body), "radar pripraven za %d s (RADAR %s)", RADAR_READY_WARN_SECS, radar_on ? "ON" : "OFF");
+      sendChannelText(body, 0);
+      ready_warn_sent = true;
+    }
+    if (!ready_sent && !settling) {
+      char body[48];
+      snprintf(body, sizeof(body), "radar pripraven (RADAR %s, SVETLO %s)", radar_on ? "ON" : "OFF", light_on ? "ON" : "OFF");
+      sendChannelText(body, 0);
+      ready_warn_sent = ready_sent = true;
+    }
 
     if (rising && radar_on && !settling) {
       motion_count++;

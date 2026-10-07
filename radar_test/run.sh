@@ -10,3 +10,6 @@ open('extracted.h', 'w').write(body)
 PY
 g++ -std=gnu++17 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I ../zahrada_test -o test test.cpp
 ./test
+# znovu s ustalovanim 5 minut (jako ve finalni verzi)
+g++ -std=gnu++17 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I ../zahrada_test -DRADAR_STARTUP_SECS=300 -o test test.cpp
+./test
