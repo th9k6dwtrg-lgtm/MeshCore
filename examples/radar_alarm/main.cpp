@@ -20,6 +20,11 @@
 #endif
 #define ALARM_COOLDOWN_MS  ((uint32_t)ALARM_COOLDOWN_SECS * 1000UL)
 
+#ifndef RADAR_STARTUP_SECS
+  #define RADAR_STARTUP_SECS  30  // po startu uzlu (a radaru) se pohyb nevyhodnocuje: radar se ustaluje
+#endif
+#define RADAR_STARTUP_MS  ((uint32_t)RADAR_STARTUP_SECS * 1000UL)
+
 #ifndef REPLY_ALL_DELAY_MS
   #define REPLY_ALL_DELAY_MS  6600  // odpoved na prikaz pro vsechny (STATUS): az po zahradnich svetlech 1-4
 #endif
@@ -112,6 +117,8 @@ protected:
   bool light_on = false;          // rozsviceni pri pohybu zapnuto
   bool motion_prev = false;       // posledni stav OT2 radaru (1 = pritomnost)
   uint32_t ot2_edges = 0;         // nabezne hrany OT2 od startu, i pri RADAR OFF (pro test radaru)
+  bool radar_seen = false;        // OT2 uz byl aspon jednou precten
+  uint32_t radar_start = 0;       // millis() prvniho cteni OT2 (zacatek ustalovani)
   uint32_t motion_count = 0;      // pocet pohybu od zapnuti hlidani
   uint32_t motion_last = 0;       // millis() posledniho pohybu
   bool alarm_sent_once = false;
@@ -199,11 +206,18 @@ protected:
 public:
   // ---------- radar: volat v kazdem pruchodu loop() s aktualnim stavem OUT ----------
   void radarLoop(bool motion) {
+    if (!radar_seen) {   // prvni cteni po startu: pritomnost, ktera uz trva, neni novy pohyb
+      radar_seen = true;
+      radar_start = millis();
+      motion_prev = motion;
+      return;
+    }
     bool rising = motion && !motion_prev;    // novy pohyb = nabezna hrana OT2
     motion_prev = motion;
     if (rising) ot2_edges++;
+    bool settling = (uint32_t)(millis() - radar_start) < RADAR_STARTUP_MS;
 
-    if (rising && radar_on) {
+    if (rising && radar_on && !settling) {
       motion_count++;
       motion_last = millis();
       alarm_pending++;

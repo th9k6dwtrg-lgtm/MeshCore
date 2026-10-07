@@ -25,6 +25,27 @@ int main() {
   strcpy(m.prefs.node_name, "dum-radar");
   g_millis = 1000;
 
+  // --- start uzlu s ulozenym RADAR ON + SVETLO ON a clovekem pred radarem ---
+  {
+    MyMesh b(mb, mr, mc, rg, rc, mt);
+    strcpy(b.prefs.node_name, "dum-radar");
+    b.radar_on = true; b.light_on = true;          // jako po loadRadarState()
+    b.applyChannelSecret((const uint8_t*)"0123456789abcdef0123456789abcdef");
+    g_sent.clear(); board.setGpio(0);
+    g_millis = 500; b.radarLoop(true); lightTimerLoop();
+    CHECK(g_sent.empty() && board.light_state == 0, "start s OT2=HIGH: zadny poplach ani svetlo");
+    g_millis = 5000; b.radarLoop(false); b.radarLoop(true); lightTimerLoop();
+    CHECK(g_sent.empty() && board.light_state == 0, "behem ustalovani (30 s) se pohyb nevyhodnocuje");
+    CHECK(b.ot2_edges == 1, "hrany OT2 se pocitaji i behem ustalovani");
+    b.radarLoop(false);
+    g_millis = 30500; b.radarLoop(true); lightTimerLoop();
+    CHECK(g_sent.size() == 1 && board.light_state == 1, "po 30 s uz pohyb rozsviti a posle zpravu");
+    board.setGpio(0); g_sent.clear();
+  }
+  g_millis = 1000;
+  m.radarLoop(false);                    // prvni cteni OT2 (zacatek ustalovani) ...
+  m.radar_start = g_millis - 100000;     // ... ustaleni uz probehlo
+
   // --- CLI ---
   CHECK(cli(m, 0, "chan") == "chan OFF", "chan bez klice");
   CHECK(cli(m, 0, "chan 00112233445566778899aabbccddeeff").rfind("OK chan ON hash=", 0) == 0, "chan 32 hex");

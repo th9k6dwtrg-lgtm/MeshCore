@@ -39,7 +39,7 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 - Zahradní světla na `STATUS RADAR`, `RADAR …` ani `SVETLO …` nereagují; radar nereaguje na `LON/LOFF`.
 - Stav RADAR/SVETLO se ukládá (`/radar_cfg`) a po restartu zůstává. Klíč kanálu je v `/radar_ch`.
 
-**Poplach:** při zapnutém hlídání a novém pohybu (náběžná hrana OUT) pošle hned `dum-radar: POHYB! bat=3.95V`. Další zpráva nejdřív za 60 s (`ALARM_COOLDOWN_SECS`), se souhrnem `POHYB! 3x za 60s, …`. Je-li zapnuté světlo, rozsvítí se na 3 s (`LIGHT_PULSE_SECS`) při každém pohybu. Zpráva jde jednou, floodem a bez potvrzení (stejně jako upozornění světel), takže přes slabé spojení nemusí dorazit; pro alarm se vyplatí vlastní repeater.
+**Poplach:** při zapnutém hlídání a novém pohybu (náběžná hrana OT2) pošle hned `dum-radar: POHYB! bat=3.95V`. Další zpráva nejdřív za 60 s (`ALARM_COOLDOWN_SECS`), se souhrnem `POHYB! 3x za 60s, …`. Je-li zapnuté světlo, rozsvítí se na 3 s (`LIGHT_PULSE_SECS`) při každém pohybu. Prvních 30 s po startu (`RADAR_STARTUP_SECS`) se pohyb nevyhodnocuje (radar se ustaluje) a přítomnost, která trvá už při startu, se za pohyb nepovažuje. Zpráva jde jednou, floodem a bez potvrzení (stejně jako upozornění světel), takže přes slabé spojení nemusí dorazit; pro alarm se vyplatí vlastní repeater.
 
 **Baterie:** stejně jako světla, slabá < 3,50 V, kritická < 3,35 V, jedna zpráva do kanálu.
 
