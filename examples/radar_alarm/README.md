@@ -31,10 +31,10 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 | `RADAR ON` / `RADAR OFF` | zapne / vypne hlídání | `dum-radar: RADAR ON` |
 | `SVETLO ON` / `SVETLO OFF` | zapne / vypne rozsvícení na 3 s při pohybu | `dum-radar: SVETLO ON` |
 | `SVETLO TEST` | rozsvítí na 3 s | `dum-radar: SVETLO TEST 3s` |
-| `STATUS RADAR` | stav radaru | `dum-radar: RADAR ON svetlo=OFF pohyb=3 (pred 5m) bat=3.95V rssi=-60 snr=9.5 up=0d02h15m` |
+| `STATUS RADAR` | stav radaru | `dum-radar: RADAR ON SVETLO OFF ot2=0/7 pohyb=3 (5m) bat=3.95V rssi=-60 snr=9.5 up=0d02h15m` |
 | `STATUS` | odpoví všechny uzly v kanálu, radar až po světlech 1–4 (6,6 s) | jako výše |
 
-- `pohyb` = počet pohybů od `RADAR ON`, `pred` = kdy byl poslední. `rssi/snr` = poslední přijatý paket (tj. tento příkaz, od nejbližšího souseda).
+- `ot2` = okamžitý stav výstupu radaru (1 = přítomnost) / počet jeho sepnutí od startu (počítá i při RADAR OFF, slouží k testu radaru). `pohyb` = počet pohybů od `RADAR ON`, v závorce kdy byl poslední. `rssi/snr` = poslední přijatý paket (tj. tento příkaz, od nejbližšího souseda).
 - Více radarů: číslo na konci jména (`dum-radar-2`), pak `RADAR OFF 2`, `STATUS 2`. Bez čísla platí pro všechny radary.
 - Zahradní světla na `STATUS RADAR`, `RADAR …` ani `SVETLO …` nereagují; radar nereaguje na `LON/LOFF`.
 - Stav RADAR/SVETLO se ukládá (`/radar_cfg`) a po restartu zůstává. Klíč kanálu je v `/radar_ch`.

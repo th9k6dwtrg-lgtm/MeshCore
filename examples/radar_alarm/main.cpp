@@ -110,7 +110,8 @@ protected:
 
   bool radar_on = false;          // hlidani zapnuto
   bool light_on = false;          // rozsviceni pri pohybu zapnuto
-  bool motion_prev = false;       // posledni stav OUT radaru
+  bool motion_prev = false;       // posledni stav OT2 radaru (1 = pritomnost)
+  uint32_t ot2_edges = 0;         // nabezne hrany OT2 od startu, i pri RADAR OFF (pro test radaru)
   uint32_t motion_count = 0;      // pocet pohybu od zapnuti hlidani
   uint32_t motion_last = 0;       // millis() posledniho pohybu
   bool alarm_sent_once = false;
@@ -198,8 +199,9 @@ protected:
 public:
   // ---------- radar: volat v kazdem pruchodu loop() s aktualnim stavem OUT ----------
   void radarLoop(bool motion) {
-    bool rising = motion && !motion_prev;    // novy pohyb = nabezna hrana OUT
+    bool rising = motion && !motion_prev;    // novy pohyb = nabezna hrana OT2
     motion_prev = motion;
+    if (rising) ot2_edges++;
 
     if (rising && radar_on) {
       motion_count++;
@@ -268,8 +270,10 @@ protected:
         else sprintf(last, "%uh%02um", (unsigned)(m / 60), (unsigned)(m % 60));
       }
       uint32_t up_min = (uint32_t)(uptime_ms / 60000ULL);
-      sprintf(reply, "RADAR %s svetlo=%s pohyb=%u (pred %s) bat=%.2fV rssi=%d snr=%.1f up=%ud%02uh%02um",
+      // ot2 = okamzity stav vystupu radaru / pocet jeho nabeznych hran od startu (i pri RADAR OFF)
+      sprintf(reply, "RADAR %s SVETLO %s ot2=%d/%u pohyb=%u (%s) bat=%.2fV rssi=%d snr=%.1f up=%ud%02uh%02um",
               radar_on ? "ON" : "OFF", light_on ? "ON" : "OFF",
+              motion_prev ? 1 : 0, (unsigned)ot2_edges,
               (unsigned)motion_count, last,
               board.getBattMilliVolts() / 1000.0f,
               (int)radio_driver.getLastRSSI(),

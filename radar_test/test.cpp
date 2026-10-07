@@ -29,7 +29,7 @@ int main() {
   CHECK(cli(m, 0, "chan") == "chan OFF", "chan bez klice");
   CHECK(cli(m, 0, "chan 00112233445566778899aabbccddeeff").rfind("OK chan ON hash=", 0) == 0, "chan 32 hex");
   std::string st = cli(m, 0, "STATUS RADAR");
-  CHECK(st.rfind("RADAR OFF svetlo=OFF pohyb=0 (pred -) bat=3.90V rssi=-61 snr=9.", 0) == 0, "STATUS RADAR format");
+  CHECK(st.rfind("RADAR OFF SVETLO OFF ot2=0/0 pohyb=0 (-) bat=3.90V rssi=-61 snr=9.", 0) == 0, "STATUS RADAR format");
   CHECK(st.find(" up=0d00h00m") != std::string::npos, "STATUS up");
   CHECK(cli(m, 0, "Status") == st, "STATUS = STATUS RADAR");
   CHECK(cli(m, 0, "radar on ") == "RADAR ON", "RADAR ON");
@@ -93,9 +93,9 @@ int main() {
   g_millis = 500000; m.radarLoop(false);
   CHECK(g_sent.size() == 1, "po RADAR OFF se cekajici souhrn neposle");
   std::string st2 = cli(m, 0, "status");
-  CHECK(st2.find("pohyb=10 (pred 1m)") != std::string::npos, "STATUS: pocet a cas posledniho pohybu");
+  CHECK(st2.find("pohyb=10 (1m)") != std::string::npos, "STATUS: pocet a cas posledniho pohybu");
   cli(m, 0, "radar on");
-  CHECK(cli(m, 0, "status").find("pohyb=0 (pred -)") != std::string::npos, "RADAR ON nuluje pocitadlo");
+  CHECK(cli(m, 0, "status").find("pohyb=0 (-)") != std::string::npos, "RADAR ON nuluje pocitadlo");
 
   // --- kanal ---
   g_sent.clear();
@@ -108,7 +108,7 @@ int main() {
   chanMsg(m, T + 1, "Jirka: radar on");
   CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: RADAR ON", "kanal radar on malymi");
   chanMsg(m, T + 2, "Jirka: STATUS RADAR");
-  CHECK(g_sent.size() == 3 && g_sent[2].text.rfind("dum-radar: RADAR ON svetlo=OFF", 0) == 0, "kanal STATUS RADAR");
+  CHECK(g_sent.size() == 3 && g_sent[2].text.rfind("dum-radar: RADAR ON SVETLO OFF", 0) == 0, "kanal STATUS RADAR");
   CHECK(g_sent[2].delay == 600, "STATUS RADAR odpovida hned");
   chanMsg(m, T + 3, "Jirka: STATUS");
   CHECK(g_sent.size() == 4 && g_sent[3].delay == REPLY_ALL_DELAY_MS, "STATUS pro vsechny: odpoved az po svetlech");
@@ -143,6 +143,25 @@ int main() {
   g_millis = 700000; m.radarLoop(false);
   CHECK(g_sent.empty(), "stary poplach se po nastaveni kanalu neposle");
 
+  // --- test radaru: ot2 a pocet hran i pri RADAR OFF ---
+  cli(m, 0, "radar off");
+  uint32_t e0 = m.ot2_edges;
+  m.radarLoop(true);
+  CHECK(cli(m, 0, "status").find(" ot2=1/") != std::string::npos, "STATUS ukazuje ot2=1 pri pritomnosti");
+  m.radarLoop(false);
+  CHECK(m.ot2_edges == e0 + 1, "hrany OT2 se pocitaji i pri RADAR OFF");
+  char exp[24]; snprintf(exp, sizeof(exp), " ot2=0/%u ", (unsigned)(e0 + 1));
+  CHECK(cli(m, 0, "status").find(exp) != std::string::npos, "STATUS ukazuje ot2=0/pocet hran");
+  // nejdelsi mozna odpoved se vejde do zpravy v kanalu (~120 B)
+  {
+    MyMesh w(mb, mr, mc, rg, rc, mt);
+    strcpy(w.prefs.node_name, "dum-radar-2");
+    w.ot2_edges = 99999; w.motion_count = 99999; w.motion_last = 0; g_millis = 23*3600000u + 59*60000u;
+    uint64_t sv = uptime_ms; uptime_ms = (uint64_t)(99*1440 + 23*60 + 59) * 60000ULL; board.mv = 4199;
+    std::string longest = std::string(w.prefs.node_name) + ": " + cli(w, 0, "status");
+    uptime_ms = sv; board.mv = 3900;
+    CHECK(longest.size() <= 120, "nejdelsi STATUS do 120 znaku");
+  }
   // --- baterie (stejna logika jako svetla) ---
   g_sent.clear();
   auto minute = [&](uint16_t mv){ board.mv = mv; m.onSensorDataRead(); };
