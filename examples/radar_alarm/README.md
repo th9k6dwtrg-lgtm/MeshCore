@@ -10,8 +10,8 @@ Firmware pro **Seeed XIAO nRF52840 + Wio-SX1262** s mmWave radarem **HLK-LD2410S
 
  XIAO 3V3 ────────────────────────► LD2410S 3V3   (jen 3,3 V, 5 V radar zničí)
  XIAO GND ────────────────────────► LD2410S GND
- XIAO D7  ◄──────────────────────── LD2410S OUT   (HIGH = přítomnost)
-                                    LD2410S TX, RX: nezapojeno
+ XIAO D7  ◄──────────────────────── LD2410S OT2   (na desce „OT2“, HIGH = přítomnost)
+                                    LD2410S OT1 (= UART TX), RX: nezapojeno
 
  XIAO D6 ── 330 Ω ──►|── GND        testovací LED (anoda k rezistoru)
                                     později MOSFET stejně jako u zahradních světel
@@ -51,7 +51,7 @@ Stejně jako světlo: `ver`, `get radio`, `set name dum-radar`, `password …`, 
 Heslo ani klíč kanálu nepatří do kódu (repozitář je veřejný).
 
 ## Nastavení radaru
-Dosah, citlivost a doba držení OUT se nastavují přes UART radaru (115200 Bd) z PC: dočasně připojit TX/RX LD2410S na USB-UART převodník **3,3 V** a použít nástroj HLK. Delší doba držení = méně opakovaných pohybů.
+Dosah, citlivost a doba držení OT2 se nastavují přes UART radaru (115200 Bd) programem HLK-LD2410S_TOOL na PC. Radar odpojit od XIAO a připojit na USB-UART převodník přepnutý na **3,3 V** (např. LaskaKit CH9102): VCC → 3V3, GND → GND, TX převodníku → RX radaru, RX převodníku → OT1 radaru. Delší doba držení = méně opakovaných pohybů. Pro první zkoušku stačí výchozí nastavení.
 
 ## Testy
 `./radar_test/run.sh`: logika příkazů, kanálu, poplachu a baterie na PC (napodoba MeshCore ze `zahrada_test/mocks.h`), běží v Actions před kompilací.

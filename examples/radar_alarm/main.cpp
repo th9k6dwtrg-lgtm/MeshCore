@@ -6,7 +6,7 @@
 #endif
 
 // Hlidaci cidlo s mmWave radarem HLK-LD2410S na XIAO nRF52840 + Wio-SX1262.
-// Zapojeni: LD2410S 3V3/GND na 3V3/GND XIAO, LD2410S OUT -> D7 (HIGH = pritomnost),
+// Zapojeni: LD2410S 3V3/GND na 3V3/GND XIAO, LD2410S OT2 -> D7 (HIGH = pritomnost), OT1 (TX) a RX nezapojene,
 //           D6 -> svetlo (pro test LED pres 330 R na GND, pozdeji MOSFET jako u zahradnich svetel).
 // Ovladani a upozorneni jdou stejne jako u zahradnich svetel pres soukromy kanal MeshCore.
 
