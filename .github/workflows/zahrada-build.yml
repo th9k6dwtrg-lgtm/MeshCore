@@ -5,7 +5,7 @@ name: Zahrada - build XIAO
 on:
   workflow_dispatch:          # rucni spusteni tlacitkem "Run workflow"
   push:
-    branches: [zahradni-svetlo]
+    branches: [zahradni-svetlo, radar-alarm]
 
 jobs:
   build:
@@ -13,13 +13,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [Xiao_nrf52_repeater_zahrada, Xiao_nrf52_light]
+        env: [Xiao_nrf52_repeater_zahrada, Xiao_nrf52_light, Xiao_nrf52_radar]
     steps:
       - name: Stazeni kodu
         uses: actions/checkout@v6
 
       - name: Logicke testy (PC, bez hardwaru)
-        run: ./zahrada_test/run.sh
+        run: |
+          ./zahrada_test/run.sh
+          ./radar_test/run.sh
 
       - name: Python
         uses: actions/setup-python@v6
