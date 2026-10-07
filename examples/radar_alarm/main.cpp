@@ -201,6 +201,13 @@ protected:
     return (i < len) ? atoi(&name[i]) : 0;
   }
 
+  // napeti baterie ve voltech: prumer 4 mereni (jedno mereni ADC kolisa), stejne jako hlidani baterie
+  float battVolts() {
+    uint32_t mv = 0;
+    for (int i = 0; i < 4; i++) mv += board.getBattMilliVolts();
+    return (mv / 4) / 1000.0f;
+  }
+
   void lightPulse() {
     lightTimerStart();                  // (znovu) spustit odpocet
     board.setGpio(board.getGpio() | 1);
@@ -248,9 +255,9 @@ public:
       char body[64];
       if (alarm_pending > 1) {
         snprintf(body, sizeof(body), "POHYB! %ux za %us, bat=%.2fV", (unsigned)alarm_pending,
-                 (unsigned)ALARM_COOLDOWN_SECS, board.getBattMilliVolts() / 1000.0f);
+                 (unsigned)ALARM_COOLDOWN_SECS, battVolts());
       } else {
-        snprintf(body, sizeof(body), "POHYB! bat=%.2fV", board.getBattMilliVolts() / 1000.0f);
+        snprintf(body, sizeof(body), "POHYB! bat=%.2fV", battVolts());
       }
       sendChannelText(body, 0);   // bez kanalu se zprava zahodi (nehromadit stare poplachy)
       alarm_sent_once = true;
@@ -308,7 +315,7 @@ protected:
               radar_on ? "ON" : "OFF", light_on ? "ON" : "OFF",
               motion_prev ? 1 : 0, (unsigned)ot2_edges,
               (unsigned)motion_count, last,
-              board.getBattMilliVolts() / 1000.0f,
+              battVolts(),
               (int)radio_driver.getLastRSSI(),
               radio_driver.getLastSNR(),
               (unsigned)(up_min / 1440), (unsigned)((up_min / 60) % 24), (unsigned)(up_min % 60));
@@ -395,7 +402,7 @@ protected:
     // test poplachu: posle zkusebni zpravu do kanalu (jen pres USB)
     if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
       char body[48];
-      snprintf(body, sizeof(body), "test poplachu, bat %.2f V", board.getBattMilliVolts() / 1000.0f);
+      snprintf(body, sizeof(body), "test poplachu, bat %.2f V", battVolts());
       strcpy(reply, sendChannelText(body, 0) ? "OK - test poplachu odeslan do kanalu" : "Err - kanal neni nastaven");
       return true;
     }
