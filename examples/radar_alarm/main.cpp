@@ -156,9 +156,12 @@ static void thresholdLine(char* dest, size_t max, const char* label, const uint8
   else verdict = changed ? "skoro jako vychozi" : "jako vychozi";
   int p = snprintf(dest, max, "%s %s:", label, verdict);
   for (int g = 0; g < LD_GATES && p > 0 && p < (int)max; g++) {
+    char item[24];
     int d = (int)v[g] - def[g];
-    if (d != 0) p += snprintf(dest + p, max - p, " %u%+d", v[g], d);
-    else p += snprintf(dest + p, max - p, " %u", v[g]);
+    int il = d != 0 ? snprintf(item, sizeof(item), " %u%+d", v[g], d) : snprintf(item, sizeof(item), " %u", v[g]);
+    if (p + il >= (int)max) break;   // jen cela cisla; posledni brany se do zpravy pripadne nevejdou
+    memcpy(dest + p, item, il + 1);
+    p += il;
   }
 }
 
@@ -185,6 +188,9 @@ class LD2410S {
         if (n == 6 + len + 4) {
           n = 0;
           is_ack = buf[0] == 0xFD;
+          // konec ramce musi sedet (04 03 02 01 / F8 F7 F6 F5), jinak je ramec poskozeny a zahodi se
+          static const uint8_t AE[4] = {0x04, 0x03, 0x02, 0x01}, DE[4] = {0xF8, 0xF7, 0xF6, 0xF5};
+          if (memcmp(&buf[6 + len], is_ack ? AE : DE, 4) != 0) continue;
           int m = len < max ? len : max;
           memcpy(p, &buf[6], m);
           return m;
@@ -196,7 +202,10 @@ class LD2410S {
 
   void dataFrame(const uint8_t* p, int l) {
     // prubeh automatickych prahu: typ 0x03, posledni 2 bajty = prubeh
-    if (l >= 3 && p[0] == 0x03) progress = p[l - 2] | (p[l - 1] << 8);
+    if (l >= 3 && p[0] == 0x03) {
+      int v = p[l - 2] | (p[l - 1] << 8);
+      if (v >= 0 && v <= 100) progress = v;   // nesmysl (poskozeny ramec) by sken predcasne ukoncil
+    }
   }
 
 public:
@@ -246,7 +255,8 @@ public:
   bool readThresholds(uint16_t cmd, uint8_t vals[LD_GATES]) {
     uint8_t d[2 * LD_GATES], out[4 * LD_GATES];
     for (int g = 0; g < LD_GATES; g++) { d[2 * g] = g; d[2 * g + 1] = 0; }
-    if (!command(cmd, d, sizeof(d), out, sizeof(out))) return false;
+    int len = 0;
+    if (!command(cmd, d, sizeof(d), out, sizeof(out), &len) || len < (int)sizeof(out)) return false;
     for (int g = 0; g < LD_GATES; g++) vals[g] = out[4 * g];
     return true;
   }
@@ -372,6 +382,7 @@ protected:
   uint32_t radar_start = 0;       // millis() prvniho cteni OT2 (zacatek ustalovani)
   bool ready_warn_sent = false;   // zprava "pripraven za 60 s" uz odesla
   bool ready_sent = false;        // zprava "pripraven" uz odesla
+  bool settled = false;           // ustalovani po startu skoncilo (dalsi WARMUP plati az po restartu)
   uint32_t motion_count = 0;      // pocet pohybu od zapnuti hlidani
   uint32_t alarm_seq = 0;         // poradove cislo zpravy POHYB! od zapnuti uzlu (jen v RAM)
   uint32_t ron_seq = 0;           // pocet rozsviceni po RON od zapnuti uzlu (jen v RAM)
@@ -419,7 +430,9 @@ public:
     if (rising) ot2_edges++;
     uint32_t since_start = (uint32_t)(millis() - radar_start);
     uint32_t startup_ms = (uint32_t)startup_secs * 1000UL;
-    bool settling = since_start < startup_ms;
+    // ustalovani jen jednou po startu (po preteceni millis() za 49,7 dne by jinak radar znovu oslepl)
+    bool settling = !settled && since_start < startup_ms;
+    if (!settling) settled = true;
     bool kal = kal_state != KAL_IDLE;   // behem kalibrace se pohyb (odchod z dosahu) nehlasi
     // po prikazech pres UART (konfiguracni rezim radaru) muze OT2 kratce spadnout a znovu sepnout: neni to pohyb
     if (uart_quiet && (uint32_t)(millis() - uart_quiet_t) >= RADAR_UART_QUIET_MS) uart_quiet = false;
@@ -569,7 +582,10 @@ protected:
       ld.end(); uartDone();
       if (!ok) { strcpy(reply, "Err - radar neodpovida (UART)"); return true; }
       int p = defaults ? sprintf(reply, "VYCHOZI zapsany, ") : 0;
-      thresholdLine(&reply[p], 150 - p, hold ? "udrzeni" : "sepnuti", hold ? h : t,
+      int room = CHAN_TEXT_MAX - (int)strlen(getNodePrefs()->node_name) - 2 + 1;   // "<jmeno>: <text>" + nula
+      if (room > 150) room = 150;
+      if (room - p < 40) room = p + 40;
+      thresholdLine(&reply[p], room - p, hold ? "udrzeni" : "sepnuti", hold ? h : t,
                     hold ? LD_DEF_HOLD : LD_DEF_TRIGGER, far_gate);
       return true;
     }
@@ -588,27 +604,23 @@ protected:
     if (strcmp(cmd, "radar on") == 0) {
       if (!radar_on) { motion_count = 0; alarm_pending = 0; alarm_sent_once = false; }
       radar_on = true;
-      saveRadarConfig();
       strcpy(reply, "RADAR ON");
       return true;
     }
     if (strcmp(cmd, "radar off") == 0) {
       radar_on = false;
       alarm_pending = 0;
-      saveRadarConfig();
       strcpy(reply, "RADAR OFF");
       return true;
     }
     if (strcmp(cmd, "svetlo on") == 0) {
       light_on = true;
-      saveRadarConfig();
       strcpy(reply, "SVETLO ON");
       return true;
     }
     if (strcmp(cmd, "svetlo off") == 0) {
       light_on = false;
       board.setGpio(board.getGpio() & ~1u);
-      saveRadarConfig();
       strcpy(reply, "SVETLO OFF");
       return true;
     }
@@ -711,8 +723,7 @@ protected:
     if (strncmp(cmd, "warmup ", 7) == 0) {
       int v = atoi(&cmd[7]);
       if (v < WARMUP_MIN || v > WARMUP_MAX) { sprintf(reply, "Err - warmup %d az %d s", WARMUP_MIN, WARMUP_MAX); return true; }
-      startup_secs = v;
-      saveRadarConfig();
+      if (startup_secs != v) { startup_secs = v; saveRadarConfig(); }   // zapis do flash jen pri zmene
       sprintf(reply, "OK warmup=%us", startup_secs);
       return true;
     }
@@ -720,8 +731,7 @@ protected:
     if (strncmp(cmd, "pauza ", 6) == 0) {
       int v = atoi(&cmd[6]);
       if (v < PAUZA_MIN || v > PAUZA_MAX) { sprintf(reply, "Err - pauza %d az %d s", PAUZA_MIN, PAUZA_MAX); return true; }
-      cooldown_secs = v;
-      saveRadarConfig();
+      if (cooldown_secs != v) { cooldown_secs = v; saveRadarConfig(); }
       sprintf(reply, "OK pauza=%us", cooldown_secs);
       return true;
     }
@@ -818,12 +828,14 @@ protected:
 
     int me = nodeNumber();
     bool prikazy = strcmp(action, "radar prikazy") == 0;
-    bool for_me = !prikazy || me <= 1, for_all = true;   // tahak bez cisla posle jen radar 1 (nebo radar bez cisla)
+    bool for_me = !prikazy || me <= 1;   // tahak bez cisla posle jen radar 1 (nebo radar bez cisla)
+    bool radar_named = false;            // "STATUS RADAR": odpovidaji jen radary, svetla mlci
     if (t != NULL) {
-      for_me = false; for_all = false;
+      for_me = false;
       for (; t != NULL; t = strtok_r(NULL, " ,", &save)) {
-        if (strcmp(t, "all") == 0) { for_me = true; for_all = true; }
-        else if (strcmp(t, "radar") == 0 || (me > 0 && atoi(t) == me)) for_me = true;
+        if (strcmp(t, "all") == 0) for_me = true;
+        else if (strcmp(t, "radar") == 0) { for_me = true; radar_named = true; }
+        else if (me > 0 && atoi(t) == me) for_me = true;
       }
     }
     if (!for_me) return;
@@ -836,8 +848,10 @@ protected:
     char result[160];
     if (!execRadar(action, result)) return;
 
-    // rozestup podle cisla radaru; prikaz pro vsechny uzly -> az po zahradnich svetlech, at se zpravy nesrazi
-    sendChannelText(result, (for_all && strcmp(action, "status") == 0 ? REPLY_ALL_DELAY_MS : REPLY_BASE_MS) + slotDelay());
+    // rozestup podle cisla radaru; STATUS i pro svetla ("STATUS", "STATUS 2") -> az po svetlech, at se zpravy
+    // radaru a svetla se stejnym cislem nesrazi
+    bool after_lights = strcmp(action, "status") == 0 && !radar_named;
+    sendChannelText(result, (after_lights ? REPLY_ALL_DELAY_MS : REPLY_BASE_MS) + slotDelay());
   }
 
   /* ======================================================================= */

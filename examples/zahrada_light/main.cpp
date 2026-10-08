@@ -132,6 +132,7 @@ protected:
     if (t != NULL) {
       for_me = false;
       for (; t != NULL; t = strtok_r(NULL, " ,", &save)) {
+        if (strcmp(t, "radar") == 0) return;   // "STATUS RADAR", "STATUS RADAR 2" je jen pro radary
         if (strcmp(t, "all") == 0 || (me > 0 && atoi(t) == me)) for_me = true;
       }
     }

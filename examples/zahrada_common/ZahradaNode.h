@@ -54,7 +54,8 @@ static uint32_t lastSundayUtc(int y, int m) {   // posledni nedele mesice (breze
 }
 // "HH:MM:SS" mistniho casu, "cas?" dokud hodiny nejsou srovnane
 static void localTimeStr(uint32_t utc, char* out) {
-  if (utc < 1704067200UL) { strcpy(out, "cas?"); return; }   // pred 1. 1. 2024 = hodiny nesrovnane
+  // hodiny bez srovnani zacinaji po startu na 15. 5. 2024 (VolatileRTCClock) -> pred 1. 1. 2025 = nesrovnane
+  if (utc < 1735689600UL) { strcpy(out, "cas?"); return; }
   int y = 1970 + (int)(utc / 31556952UL);                     // rok (pripadne o 1 vic, opravi se nize)
   if ((uint32_t)daysFromCivil(y, 1, 1) * 86400UL > utc) y--;
   bool dst = utc >= lastSundayUtc(y, 3) && utc < lastSundayUtc(y, 10);
@@ -74,6 +75,8 @@ static void localTimeStr(uint32_t utc, char* out) {
 #define BATKAL_MIN         800   // korekce mereni baterie 0,800 az 1,250
 #define BATKAL_MAX        1250
 #define BATKAL_FILE  "/batkal"
+#define CHAN_MAX_SENDERS    16   // ochrana proti prehrani: az 16 ruznych lidi (jmen) v kanalu
+#define CHAN_TS_FILE  "/chan_ts" // jejich posledni casova razitka (prezije restart)
 
 #define SLOT_MS           1500   // rozestup zprav sousednich cisel uzlu
 #define REPLY_BASE_MS      600   // zakladni zpozdeni odpovedi na prikaz
@@ -95,6 +98,18 @@ public:
       if (f.read(buf, sizeof(buf)) == (int)sizeof(buf)) applyChannelSecret(buf);
       f.close();
     }
+    // posledni casova razitka odesilatelu: stara nahrana zprava neprojde ani po restartu
+    File r = InternalFS.open(CHAN_TS_FILE, FILE_O_READ);
+    if (r) {
+      uint8_t h[2];
+      if (r.read(h, 2) == 2 && h[0] <= CHAN_MAX_SENDERS && h[1] < CHAN_MAX_SENDERS &&
+          r.read((uint8_t*)chan_senders, h[0] * sizeof(ChanSender)) == (int)(h[0] * sizeof(ChanSender))) {
+        chan_senders_n = h[0];
+        chan_senders_next = h[1];
+      }
+      r.close();
+    }
+    chan_senders_dirty = false;
     File k = InternalFS.open(BATKAL_FILE, FILE_O_READ);
     if (k) {
       uint8_t b[2];
@@ -117,10 +132,11 @@ protected:
 
   // Ochrana proti prehrani v kanalu: od kazdeho odesilatele (jmeno v zasifrovane zprave) jen novejsi
   // casove razitko. Zvlast pro kazdeho, aby nevadil rozdil hodin mezi telefony (napr. 2 lide v kanalu).
-  #define CHAN_MAX_SENDERS  16   // az 16 ruznych lidi (jmen) v kanalu
+  // Tabulka se uklada do flash (CHAN_TS_FILE), plati tedy i po restartu; CHAN <klic> ji vymaze.
   struct ChanSender { uint32_t name_hash; uint32_t last_ts; };
   ChanSender chan_senders[CHAN_MAX_SENDERS];
   uint8_t chan_senders_n = 0, chan_senders_next = 0;
+  bool chan_senders_dirty = false;   // tabulka se zmenila, ulozit (nejvys 1x za minutu, setri flash)
 
   static uint32_t nameHash(const char* s, size_t n) {   // FNV-1a
     uint32_t h = 2166136261u;
@@ -132,6 +148,7 @@ protected:
       if (chan_senders[i].name_hash == name_hash) {
         if (ts <= chan_senders[i].last_ts) return false;   // stejna nebo starsi zprava = prehrani
         chan_senders[i].last_ts = ts;
+        chan_senders_dirty = true;
         return true;
       }
     }
@@ -140,6 +157,7 @@ protected:
     else { idx = chan_senders_next; chan_senders_next = (chan_senders_next + 1) % CHAN_MAX_SENDERS; }
     chan_senders[idx].name_hash = name_hash;
     chan_senders[idx].last_ts = ts;
+    chan_senders_dirty = true;
     return true;
   }
 
@@ -185,7 +203,22 @@ protected:
     }
   }
 
+  void saveSenders() {
+    chan_senders_dirty = false;
+#if defined(NRF52_PLATFORM)
+    InternalFS.remove(CHAN_TS_FILE);
+    File f = InternalFS.open(CHAN_TS_FILE, FILE_O_WRITE);
+    if (f) {
+      uint8_t h[2] = { chan_senders_n, chan_senders_next };
+      f.write(h, 2);
+      f.write((const uint8_t*)chan_senders, chan_senders_n * sizeof(ChanSender));
+      f.close();
+    }
+#endif
+  }
+
   void onSensorDataRead() override {   // vola SensorMesh 1x za minutu
+    if (chan_senders_dirty) saveSenders();   // ochrana proti prehrani i po restartu
 #ifdef NRF52_POWER_MANAGEMENT
     if (board.isExternalPowered()) { low_cnt = crit_cnt = 0; return; }   // na USB napeti baterie nevypovida
 #endif
@@ -211,6 +244,7 @@ protected:
     mesh::Utils::sha256(light_chan.hash, sizeof(light_chan.hash), light_chan.secret, klen);
     light_chan_ok = true;
     chan_senders_n = chan_senders_next = 0;
+    chan_senders_dirty = true;
   }
 
   bool saveChannel(const uint8_t* secret32) {

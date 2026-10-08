@@ -43,7 +43,7 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 - `ot2` = okamžitý stav výstupu radaru (1 = přítomnost) / počet jeho sepnutí od startu (počítá i při RADAR OFF, slouží k testu radaru). `pohyb` = počet pohybů od `RADAR ON`, v závorce kdy byl poslední. `rssi/snr` = poslední přijatý paket (tj. tento příkaz, od nejbližšího souseda).
 - Více radarů: číslo na konci jména (`RADAR 2`, světla `LIGHT 2`), pak `RADAR OFF 2`, `RON 2`, `STATUS 2`. Číslo jde přidat ke každému příkazu radaru (i víc čísel, `RON 1 3`). Bez čísla platí pro všechny radary.
 - Zprávy od uzlů, jejichž jméno obsahuje „radar“ (`RADAR 2`, `dum-radar-2`), radar ignoruje. Jejich odpovědi jako `RADAR ON` by jinak ostatní radary braly jako příkaz a odpovídaly by si navzájem dokola. Člověk v kanálu proto nesmí mít „radar“ ve jménu.
-- **Rozestupy odpovědí** jako u světel: radar 1 odpovídá za 0,6 s, radar 2 o 1,5 s později, …, radar bez čísla jako 5. (8 oken, radar 9 = okno radaru 1). Na `STATUS` pro všechny se celé pořadí posune až za světla (+6,6 s). Stejně se rozkládají i zprávy „radar pripraven“, baterie a výsledky kalibrace. `POHYB!` jde vždy hned.
+- **Rozestupy odpovědí** jako u světel: radar 1 odpovídá za 0,6 s, radar 2 o 1,5 s později, …, radar bez čísla jako 5. (8 oken, radar 9 = okno radaru 1). Na `STATUS` a `STATUS 2` (odpovídají i světla) se radary posunou až za světla (+6,6 s), aby se radar 2 nesrazil se světlem 2; na `STATUS RADAR` odpovídají hned. Stejně se rozkládají i zprávy „radar pripraven“, baterie a výsledky kalibrace. `POHYB!` jde vždy hned.
 - Zahradní světla na `STATUS RADAR`, `RADAR …` ani `SVETLO …` nereagují; radar nereaguje na `LON/LOFF` ani `LIGHT PRIKAZY`.
 - Světla mají vlastní tahák `LIGHT PRIKAZY` (odpoví světlo 1, `LIGHT PRIKAZY 2` světlo 2), jedna zpráva: `LIGHT 1: prikazy:` a řádky `LON - svetlo na 5 s`, `LOFF - zhasnout`, `STATUS - stav vsech uzlu`, `LIGHT PRIKAZY - tento seznam`, `LON 2 = jen svetlo 2`.
 - Tahák začíná slovem `prikazy`, které není příkaz, takže žádný uzel na něj nereaguje. Zprávy taháku jsou dlouhé až 139 znaků; s dlouhým jménem uzlu se rozdělí do více zpráv.
@@ -59,7 +59,7 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 
 | Příkaz | Co udělá | Odpověď |
 |---|---|---|
-| `WARMUP 300` | ustalování po startu 10–900 s (bez čísla zobrazí) | `OK warmup=300s` |
+| `WARMUP 300` | ustalování po startu 10–900 s (bez čísla zobrazí), po skončení ustalování platí nová hodnota od dalšího startu | `OK warmup=300s` |
 | `PAUZA 120` | nejkratší odstup zpráv o pohybu 10–3600 s | `OK pauza=120s` |
 | `BATKAL 4.12` | korekce měření baterie: zadej napětí naměřené multimetrem na článku (2,5–4,5 V, čárka i tečka, korekce max. ±20 %) | `batkal=1.026 bat=4.12V` |
 | `BATKAL OFF` | bez korekce | `batkal=1.000 bat=…` |
@@ -68,7 +68,7 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 Korekce `BATKAL` platí pro napětí ve zprávách, `STATUS` i hlídání slabé baterie (telemetrie v aplikaci zůstává bez korekce). `BATKAL` a `CHAN` umí stejně i zahradní světlo, ukládá se do `/batkal`.
 
 ## Společný kód se světly
-Kanál (`CHAN`, ochrana proti přehrání, odesílání zpráv), hlídání baterie s `BATKAL`, rozestupy podle čísla uzlu, watchdog a doba běhu jsou v `examples/zahrada_common/ZahradaNode.h`, ze kterého vychází světlo (`examples/zahrada_light`) i radar. Pořád jsou to dva samostatné firmwary: světlo umí jen `LON`/`LOFF`/`STATUS` a spíná D6. Po změně společného souboru je potřeba projít testy obou (`./zahrada_test/run.sh` a `./radar_test/run.sh`, v Actions běží automaticky).
+Kanál (`CHAN`, ochrana proti přehrání, odesílání zpráv), hlídání baterie s `BATKAL`, rozestupy podle čísla uzlu, watchdog a doba běhu jsou v `examples/zahrada_common/ZahradaNode.h`, ze kterého vychází světlo (`examples/zahrada_light`) i radar. Pořád jsou to dva samostatné firmwary: světlo umí jen `LON`/`LOFF`/`STATUS`/`LIGHT PRIKAZY` a spíná D6. Ochrana proti přehrání si pamatuje poslední časové razítko až 16 odesílatelů a ukládá ho do flash (`/chan_ts`, nejvýš 1× za minutu), takže stará nahraná zpráva neprojde ani po restartu; `CHAN <klíč>` tabulku vymaže. Po změně společného souboru je potřeba projít testy obou (`./zahrada_test/run.sh` a `./radar_test/run.sh`, v Actions běží automaticky).
 
 ## Nastavení nového uzlu (USB konzole)
 Stejně jako světlo: `ver`, `get radio`, `set name RADAR 1`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `RON`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.

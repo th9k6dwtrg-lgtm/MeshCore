@@ -105,6 +105,8 @@ static void pulse(MyMesh& m) { m.radarLoop(true); lightTimerLoop(); m.radarLoop(
 int main() {
   // mistni cas ve zpravach: CET/CEST podle pravidla EU
   CHECK(lt(1000) == "cas?", "nesrovnane hodiny");
+  CHECK(lt(1715770351 + 3600) == "cas?", "hodiny po restartu (15. 5. 2024 + 1 h) jsou nesrovnane");
+  CHECK(lt(1735689600) == "01:00:00", "od 1. 1. 2025 je cas platny");
   CHECK(lt(1774745999) == "01:59:59" && lt(1774746000) == "03:00:00", "prechod na letni cas 29. 3. 2026");
   CHECK(lt(1792889999) == "02:59:59" && lt(1792890000) == "02:00:00", "prechod na zimni cas 25. 10. 2026");
   CHECK(lt(1835479800) == "00:30:00", "prestupny rok, zimni cas");
@@ -271,7 +273,8 @@ int main() {
   chanMsg(m, T + 15, "Jirka: RADAR OFF 2");         CHECK(!m.radar_on, "RADAR OFF 2 je pro radar 2");
   chanMsg(m, T + 16, "Jirka: STATUS 2");            CHECK(g_sent.back().text.rfind("dum-radar-2: RADAR OFF", 0) == 0, "STATUS 2 pro radar 2");
   // rozestupy odpovedi podle cisla radaru (jako zahradni svetla)
-  CHECK(g_sent.back().delay == 600 + 1500, "radar 2 odpovida o 1,5 s po radaru 1");
+  CHECK(g_sent.back().delay == REPLY_ALL_DELAY_MS + 1500, "STATUS 2: radar 2 az po svetle 2 (nesrazi se)");
+  chanMsg(m, T + 16, "Petr: STATUS RADAR 2");      CHECK(g_sent.back().delay == 600 + 1500, "radar 2 odpovida o 1,5 s po radaru 1");
   chanMsg(m, T + 17, "Jirka: STATUS");              CHECK(g_sent.back().delay == REPLY_ALL_DELAY_MS + 1500, "STATUS pro vsechny: radar 2 po svetlech a po radaru 1");
   strcpy(m.prefs.node_name, "dum-radar-1");
   chanMsg(m, T + 18, "Jirka: STATUS RADAR");        CHECK(g_sent.back().delay == 600, "radar 1 odpovida hned");
@@ -430,6 +433,11 @@ int main() {
     CHECK(radar_uart.auto_scan == 900 && !radar_uart.config, "po 60 s sken 900 s, radar mimo konfiguraci");
     radar_uart.progress(50); k.radarKalLoop();
     CHECK(cli(k, 0, "status").find(" kal=50") != std::string::npos, "STATUS ukazuje prubeh");
+    radar_uart.progress(356); k.radarKalLoop();          // nesmysl z poskozeneho ramce
+    CHECK(k.ld.progress == 50 && k.kal_done == 0, "prubeh nad 100 % ignorovan (sken neskonci predcasne)");
+    // ramec s poskozenym koncem se zahodi
+    radar_uart.progress(100); radar_uart.in.back() ^= 0xFF; k.radarKalLoop();
+    CHECK(k.ld.progress == 50 && k.kal_done == 0, "ramec se spatnym koncem zahozen");
     CHECK(cli(k, 0, "radar prahy") == "KALIBRACE bezi, prahy az po ni", "prahy behem kalibrace ne");
     radar_uart.trig[0] = 55; radar_uart.hold[15] = 20;   // radar si nastavil nove prahy
     uint32_t ts = k.kal_t0;
@@ -508,6 +516,16 @@ int main() {
     CHECK(line().rfind("sepnuti citlivejsi i mene citlive: ", 0) == 0, "obe strany");
     radar_uart.trig[3] = 20;
     CHECK(line().rfind("sepnuti POZOR prilis citlive: 48 42 36 20-14 ", 0) == 0, "o 10 a vic citlivejsi = POZOR");
+    {   // dlouhe jmeno a vsechny brany hodne mimo: zprava do 139 znaku vcetne jmena, jen cela cisla
+      uint8_t keep[16]; memcpy(keep, radar_uart.trig, 16);
+      char nm[32]; strcpy(nm, k.prefs.node_name);
+      strcpy(k.prefs.node_name, "zahrada-radar-zadni-12");
+      for (int g = 0; g < 16; g++) radar_uart.trig[g] = 100;
+      std::string r = line();
+      CHECK(r.rfind("sepnuti POZOR malo citlive: 100+52 100+58 ", 0) == 0 && 24 + r.size() <= 139 && isdigit((unsigned char)r.back()),
+            "RADAR PRAHY s dlouhym jmenem do 139 znaku, jen cela cisla");
+      strcpy(k.prefs.node_name, nm); memcpy(radar_uart.trig, keep, 16);
+    }
     radar_uart.trig[3] = 34; radar_uart.trig[5] = 45;
     CHECK(line().rfind("sepnuti POZOR malo citlive: ", 0) == 0, "o 10 a vic mene citlive = POZOR");
     radar_uart.trig[5] = 31; radar_uart.trig[14] = 10;
@@ -597,14 +615,18 @@ int main() {
     CHECK(g_sent.back().text == "dum-radar-1: radar pripraven (RADAR ON, SVETLO OFF)" && g_sent.back().delay == 0, "konec warm-upu, radar 1 bez zpozdeni");
     g_sent.clear();
     g_millis += 1000; pulse(c);
-    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! c.1 12:52:31 bat=4.00V SVETLO OFF", "pohyb po warm-upu, napeti s korekci");
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! c.1 cas? bat=4.00V SVETLO OFF", "pohyb po warm-upu, napeti s korekci, hodiny jeste nesrovnane");
     g_millis += 60000; pulse(c);
     g_millis += 59999; c.radarLoop(false);
     CHECK(g_sent.size() == 1, "pauza 120 s: po 60 s jeste nic");
     g_millis += 1; c.radarLoop(false);
-    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! c.2 12:52:31 bat=4.00V SVETLO OFF", "po 120 s dalsi zprava");
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! c.2 cas? bat=4.00V SVETLO OFF", "po 120 s dalsi zprava");
     g_millis += 120000; pulse(c); g_millis += 10000; pulse(c); g_millis += 10000; pulse(c); g_millis += 100000; c.radarLoop(false);
-    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! c.4 12:52:31 2x za 120s bat=4.00V SVETLO OFF", "souhrn uvadi nastavenou pauzu");
+    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! c.4 cas? 2x za 120s bat=4.00V SVETLO OFF", "souhrn uvadi nastavenou pauzu");
+    // prvni zprava v kanalu srovna hodiny, od te doby je v POHYB! mistni cas
+    chanMsg(c, 1790000000, "Jirka: ahoj");
+    g_millis += 200000; pulse(c);
+    CHECK(g_sent.size() == 5 && g_sent[4].text == "dum-radar-1: POHYB! c.5 " + lt(1790000000) + " bat=4.00V SVETLO OFF", "po srovnani hodin mistni cas");
 
     // baterie s korekci: 3,41 V z ADC x 1,026 = 3,50 V -> uz neni slaba
     g_sent.clear();

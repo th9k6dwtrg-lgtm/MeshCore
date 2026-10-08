@@ -74,6 +74,9 @@ int main() {
   { uint32_t n = m.light_seq; cli(m, 0, "lon"); CHECK(m.light_seq == n + 1, "kazde LON zvysi poradove cislo o 1"); cli(m, 0, "loff"); }
   CHECK(g_sent[0].delay == 600, "zpozdeni svetla 1");
   CHECK(m.rtc.t >= T, "hodiny srovnany podle kanalu");
+  CHECK(m.chan_senders_dirty, "nove razitko odesilatele -> ulozit");
+  m.onSensorDataRead();
+  CHECK(!m.chan_senders_dirty, "razitka ulozena pri minutovem mereni (preziji restart)");
   board.setGpio(0);
   chanMsg(m, T, "Jirka: LON");             CHECK(board.light_state == 0, "prehrani stejne zpravy odmitnuto");
   chanMsg(m, T - 5, "Jirka: LON");         CHECK(board.light_state == 0, "starsi zprava stejneho odesilatele odmitnuta");
@@ -91,6 +94,8 @@ int main() {
   chanMsg(m, T + 16, "svetlo-2: OFF bat=3.80V rssi=-60 snr=9.5 up=0d01h00m"); CHECK(g_sent.size() == before, "STATUS odpoved jineho svetla ignorovana");
   chanMsg(m, T + 17, "svetlo-2: baterie slaba 3.45 V"); CHECK(g_sent.size() == before, "upozorneni jineho svetla ignorovano");
   chanMsg(m, T + 18, "Jirka: ahoj");       CHECK(g_sent.size() == before, "bezna zprava ignorovana");
+  chanMsg(m, T + 18, "Petr: STATUS RADAR");  CHECK(g_sent.size() == before, "STATUS RADAR svetlo ignoruje");
+  chanMsg(m, T + 19, "Petr: STATUS RADAR 1"); CHECK(g_sent.size() == before, "STATUS RADAR 1 svetlo 1 ignoruje");
   chanMsg(m, T + 19, "Jirka: STATUS");     CHECK(g_sent.size() == before + 1 && g_sent.back().text.rfind("svetlo-1: OFF bat=", 0) == 0, "STATUS v kanalu");
   strcpy(m.prefs.node_name, "svetlo-4");
   chanMsg(m, T + 20, "Jirka: STATUS");     CHECK(g_sent.back().delay == 600 + 3*1500, "zpozdeni svetla 4");
