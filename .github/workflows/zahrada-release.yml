@@ -1,0 +1,59 @@
+# Zahrada: vydani verze. Spousti se rucne (Actions -> "Zahrada - vydani" -> Run workflow, vetev zahradni-svetlo).
+# Prelozi firmware svetla a radaru, vytvori stitek (napr. zahrada-v1.0) a GitHub Release
+# s .uf2 soubory, PDF navodem a skriptem ld2410s.py.
+name: Zahrada - vydani
+
+on:
+  workflow_dispatch:
+    inputs:
+      stitek:
+        description: 'Stitek vydani (napr. zahrada-v1.0)'
+        required: true
+        default: 'zahrada-v1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stazeni kodu
+        uses: actions/checkout@v6
+
+      - name: Logicke testy (PC, bez hardwaru)
+        run: |
+          ./zahrada_test/run.sh
+          ./radar_test/run.sh
+
+      - name: Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Instalace PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Kompilace a prevod na .uf2
+        env:
+          TAG: ${{ inputs.stitek }}
+        run: |
+          VER="zahrada-${TAG#zahrada-v}"
+          mkdir -p out
+          for ENV in Xiao_nrf52_light Xiao_nrf52_radar; do
+            pio run -e $ENV
+            python3 bin/uf2conv/uf2conv.py .pio/build/$ENV/firmware.hex -c -o out/$ENV-$VER.uf2 -f 0xADA52840
+          done
+          ls -la out
+
+      - name: Vydani na GitHubu
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.stitek }}
+        run: |
+          gh release create "$TAG" out/*.uf2 \
+            examples/radar_alarm/navod/radarovy-hlidac-meshcore-navod.pdf \
+            examples/radar_alarm/ld2410s.py \
+            --target "$GITHUB_SHA" \
+            --title "Zahrada ${TAG#zahrada-v}" \
+            --notes-file examples/radar_alarm/vydani.md

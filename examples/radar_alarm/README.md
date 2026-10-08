@@ -2,7 +2,7 @@
 
 Firmware pro **Seeed XIAO nRF52840 + Wio-SX1262** s mmWave radarem **HLK-LD2410S**. Postavený stejně jako zahradní světlo (`examples/zahrada_light`): MeshCore Sensor, ovládání a upozornění přes soukromý kanál, watchdog, hlídání baterie, bez I2C (`XIAO_NO_I2C`). PlatformIO env: **`Xiao_nrf52_radar`**, hotový `.uf2` je v GitHub Actions (workflow „Zahrada - build XIAO“, artefakt `Xiao_nrf52_radar`).
 
-Verze **zahrada-1.0** (vypíše ji příkaz `ver` v USB konzoli, stejně u světla), vydání je na GitHubu pod štítkem `zahrada-v1.0`.
+Verze **zahrada-1.0** (vypíše ji příkaz `ver` v USB konzoli, stejně u světla), vydání je na GitHubu pod štítkem `zahrada-v1.0` (vytváří ho ručně spouštěný workflow „Zahrada - vydani“). Návod v PDF je v `navod/`, skript pro nastavení radaru z počítače je `ld2410s.py`.
 
 ## Zapojení
 
