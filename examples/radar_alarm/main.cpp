@@ -65,6 +65,7 @@ static void lightTimerLoop() {
 // az do vypnuti napajeni (videno 8. 10. 2026). Proto se ceka na 100 % a jeste RADAR_KAL_GRACE_MS.
 // Sken trva o neco dele nez zadana doba (120 s -> 124 s), bez hlaseni 100 % se ceka doba + 25 %.
 #define RADAR_KAL_GRACE_MS      20000UL
+#define KAL_MSG_MAX  130     // delka zpravy do kanalu, ktera se v aplikaci jeste zobrazi cela (app ma limit 139)
 #define RADAR_UART_QUIET_MS     5000UL    // po prikazech pres UART 5 s nehlasit pohyb (OT2 muze preblikout)
 #define RADAR_KAL_RETRY_MS      10000UL   // kdyz radar po skenu neodpovi, zkusit znovu za 10 s
 #define RADAR_KAL_TRIES         6         // ... nejvyse 6x
@@ -86,6 +87,54 @@ static const uint8_t LD_DEF_HOLD[LD_GATES]    = {45, 42, 33, 32, 28, 28, 28, 28,
 static const uint8_t LD_PARAM_IDS[LD_NPARAMS] = {0x05, 0x0A, 0x06, 0x02, 0x0C, 0x0B};
 #define LD_SAME_DIFF   3   // odchylka do +-3 od vychozi hodnoty = "skoro jako vychozi"
 #define LD_WARN_DIFF  10   // od +-10 "POZOR" (odhad z praxe, ne udaj vyrobce)
+
+// Srozumitelne shrnuti kalibrace pro kanal (cisla po branach dava RADAR PRAHY). Jedna strana zmen, napr.
+// "citlivejsi o 1-5 (12 bran)" nebo "mene citlive o 3 (0,7-1,4 m)"; sign -1 = citlivejsi, +1 = mene citlive.
+// Brana je asi 0,7 m (brana 0 = 0-0,7 m). Vrati pocet bran na te strane.
+static void kalMeters(char* dest, int gate) {   // zacatek brany v metrech: 0, 0,7, 1,4 ... 7, 7,7
+  int dm = gate * 7;
+  if (dm % 10) sprintf(dest, "%d,%d", dm / 10, dm % 10); else sprintf(dest, "%d", dm / 10);
+}
+
+static int kalSide(char* dest, size_t max, const uint8_t* v, const uint8_t* def, int far_gate, int sign) {
+  int n = 0, dmin = 1000, dmax = 0, first = -1, last = -1;
+  bool contig = true;
+  for (int g = 0; g <= far_gate && g < LD_GATES; g++) {
+    int d = ((int)v[g] - def[g]) * sign;   // kladne = zmena na teto strane
+    if (d <= 0) continue;
+    if (first < 0) first = g; else if (last != g - 1) contig = false;
+    last = g; n++;
+    if (d < dmin) dmin = d;
+    if (d > dmax) dmax = d;
+  }
+  if (n == 0 || max == 0) { if (max) dest[0] = 0; return n; }
+  int p = snprintf(dest, max, "%s%s o %d", dmax >= LD_WARN_DIFF ? "POZOR " : "", sign < 0 ? "citlivejsi" : "mene citlive", dmin);
+  if (dmax != dmin && p > 0 && p < (int)max) p += snprintf(dest + p, max - p, "-%d", dmax);
+  if (p > 0 && p < (int)max) {
+    if (contig) {
+      char m1[8], m2[8];
+      kalMeters(m1, first);
+      kalMeters(m2, last + 1);
+      p += snprintf(dest + p, max - p, " (%s-%s m)", m1, m2);
+    }
+    else snprintf(dest + p, max - p, " (%d %s)", n, n < 5 ? "brany" : "bran");
+  }
+  return n;
+}
+
+// "sepnuti citlivejsi o 1-5 (12 bran), mene citlive o 3 (0,7-1,4 m)" / "sepnuti jako vychozi"; warn = nekde odchylka 10+
+static void kalSummary(char* dest, size_t max, const char* label, const uint8_t* v, const uint8_t* def, int far_gate, bool& warn) {
+  char a[48], b[48];
+  int na = kalSide(a, sizeof(a), v, def, far_gate, -1);
+  int nb = kalSide(b, sizeof(b), v, def, far_gate, +1);
+  for (int g = 0; g <= far_gate && g < LD_GATES; g++) {
+    int d = (int)v[g] - def[g];
+    if (d >= LD_WARN_DIFF || d <= -LD_WARN_DIFF) warn = true;
+  }
+  if (na == 0 && nb == 0) snprintf(dest, max, "%s jako vychozi", label);
+  else if (na && nb) snprintf(dest, max, "%s %s, %s", label, a, b);
+  else snprintf(dest, max, "%s %s", label, na ? a : b);
+}
 
 // radek prahu pro cloveka, napr. "sepnuti citlivejsi: 44-4 42 36 ...": u zmenenych bran rozdil proti vychozi
 // hodnote (minus = citlivejsi, plus = mene citlive). Hodnoceni jen pro brany 0..far_gate, ktere radar pouziva.
@@ -453,12 +502,26 @@ public:
     ld.end(); uartDone();
     kal_state = KAL_IDLE;
     if (!ok) { sendChannelText("kalibrace CHYBA: radar neodpovida, vypni a zapni uzel", slotDelay()); return; }
-    char body[160];
-    strcpy(body, "kalibrace: ");
-    thresholdLine(&body[strlen(body)], sizeof(body) - strlen(body), "sepnuti", t, LD_DEF_TRIGGER, far_gate);
-    sendChannelText(body, slotDelay());
-    thresholdLine(body, sizeof(body), "udrzeni", h, LD_DEF_HOLD, far_gate);
-    sendChannelText(body, slotDelay() + 1000);
+    // jedna srozumitelna veta v metrech, napr. "kalibrace OK: sepnuti citlivejsi o 1-5 (12 bran), mene citlive o 3
+    // (0,7-1,4 m); udrzeni ..."; cisla po branach vrati RADAR PRAHY. Nevejde-li se do jedne zpravy, jdou dve.
+    char s[96], u[96], body[256];
+    bool warn = false;
+    kalSummary(s, sizeof(s), "sepnuti", t, LD_DEF_TRIGGER, far_gate, warn);
+    kalSummary(u, sizeof(u), "udrzeni", h, LD_DEF_HOLD, far_gate, warn);
+    const char* head = warn ? "kalibrace POZOR" : "kalibrace OK";
+    const char* tail = warn ? ". Zopakuj nebo RADAR PRAHY VYCHOZI" : ". Cisla: RADAR PRAHY";
+    size_t room = KAL_MSG_MAX - strlen(getNodePrefs()->node_name) - 2;   // zprava v kanalu "<jmeno>: <text>"
+    snprintf(body, sizeof(body), "%s: %s; %s%s", head, s, u, tail);
+    if (strlen(body) > room) snprintf(body, sizeof(body), "%s: %s; %s", head, s, u);
+    if (strlen(body) <= room) {
+      sendChannelText(body, slotDelay());
+    } else {
+      snprintf(body, sizeof(body), "%s: %s", head, s);
+      sendChannelText(body, slotDelay());
+      snprintf(body, sizeof(body), "%s: %s%s", head, u, tail);
+      if (strlen(body) > room) snprintf(body, sizeof(body), "%s: %s", head, u);
+      sendChannelText(body, slotDelay() + 1000);
+    }
     if (restored > 0) sendChannelText("kalibrace: radar zmenil sve nastaveni, vraceno zpet", slotDelay() + 2000);
     else if (restored < 0) sendChannelText("kalibrace: nastaveni radaru nejde overit", slotDelay() + 2000);
 #endif

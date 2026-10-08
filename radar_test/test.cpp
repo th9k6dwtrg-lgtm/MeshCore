@@ -393,19 +393,16 @@ int main() {
     g_millis = td + RADAR_KAL_GRACE_MS - 10; k.radarKalLoop();   // napodoba UART pri cteni posune cas o 1 ms
     CHECK(g_sent.empty() && radar_uart.cmds.size() == ncmd, "radar uklada prahy: jeste se nic neposila");
     g_millis = td + RADAR_KAL_GRACE_MS; k.radarKalLoop();
-    CHECK(g_sent.size() == 2 && g_sent[0].text ==
-          "dum-radar: kalibrace: sepnuti mene citlive: 55+7 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31",
-          "po skenu nove prahy sepnuti do kanalu, s rozdilem proti vychozim");
-    CHECK(g_sent.size() == 2 && g_sent[1].text ==
-          "dum-radar: udrzeni jako vychozi: 45 42 33 32 28 28 28 28 28 28 28 28 28 28 28 20-8",
-          "prahy udrzeni druhou zpravou; brana 15 za far=12 se nehodnoti");
-    CHECK(g_sent.size() == 2 && g_sent[0].delay == 6000 && g_sent[1].delay == 7000, "zpravy o kalibraci s rozestupem radaru");
+    CHECK(g_sent.size() == 1 && g_sent[0].text ==
+          "dum-radar: kalibrace OK: sepnuti mene citlive o 7 (0-0,7 m); udrzeni jako vychozi. Cisla: RADAR PRAHY",
+          "po skenu jedna srozumitelna veta v metrech (brana 15 je za far, nehodnoti se)");
+    CHECK(g_sent.size() == 1 && g_sent[0].delay == 6000, "zprava o kalibraci s rozestupem radaru");
     CHECK(!radar_uart.open && k.kal_state == MyMesh::KAL_IDLE, "po kalibraci UART vypnuty");
     CHECK(cli(k, 0, "status").find(" kal=") == std::string::npos, "STATUS bez kal po kalibraci");
     g_millis += 1000; pulse(k);
-    CHECK(g_sent.size() == 2, "hned po kalibraci (UART) se OT2 nevyhodnocuje");
+    CHECK(g_sent.size() == 1, "hned po kalibraci (UART) se OT2 nevyhodnocuje");
     g_millis += RADAR_UART_QUIET_MS; pulse(k);
-    CHECK(g_sent.size() == 3 && g_sent[2].text.rfind("dum-radar: POHYB!", 0) == 0, "po kalibraci zase hlida");
+    CHECK(g_sent.size() == 2 && g_sent[1].text.rfind("dum-radar: POHYB!", 0) == 0, "po kalibraci zase hlida");
 
     // kanal: doba a cile
     g_sent.clear(); radar_uart.auto_scan = -1;
@@ -445,10 +442,10 @@ int main() {
     g_millis = k.kal_retry_t + RADAR_KAL_RETRY_MS - 10; k.radarKalLoop();
     CHECK(g_sent.empty() && k.kal_tries == 1, "dalsi pokus az za 10 s");
     g_millis = k.kal_retry_t + RADAR_KAL_RETRY_MS; k.radarKalLoop();
-    CHECK(g_sent.size() == 3 && g_sent[2].text == "dum-radar: kalibrace: radar zmenil sve nastaveni, vraceno zpet",
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: kalibrace: radar zmenil sve nastaveni, vraceno zpet",
           "zmena nastaveni radaru ohlasena");
     CHECK(radar_uart.delay_s == 10, "doba drzeni vracena na 10 s");
-    CHECK(g_sent.size() == 3 && g_sent[2].delay == g_sent[0].delay + 2000, "treti zprava s rozestupem");
+    CHECK(g_sent.size() == 2 && g_sent[1].delay == g_sent[0].delay + 2000, "zprava o zmene nastaveni s rozestupem");
     CHECK(k.kal_state == MyMesh::KAL_IDLE && !radar_uart.open, "konec kalibrace, UART vypnuty");
     radar_uart.mute_until = 0;
 
@@ -477,6 +474,26 @@ int main() {
       thresholdLine(ln, sizeof(ln), "sepnuti", v, LD_DEF_TRIGGER, 15);
       std::string msg = std::string("dum-radar-12: kalibrace: ") + ln;
       CHECK(msg.find("citlivejsi i mene citlive") != std::string::npos && msg.size() <= 139, "nejdelsi zprava o kalibraci do 139 znaku");
+    }
+
+    // shrnuti kalibrace: data ze screenshotu (8. 10. 2026), nejdelsi pripady se vejdou do zpravy v kanalu
+    {
+      const uint8_t st[16] = {47, 45, 32, 30, 28, 28, 28, 29, 27, 26, 27, 27, 26, 25, 26, 26};
+      const uint8_t sh[16] = {45, 45, 29, 27, 27, 27, 27, 28, 26, 25, 26, 26, 25, 24, 25, 25};
+      char a[96], b[96]; bool w = false;
+      kalSummary(a, sizeof(a), "sepnuti", st, LD_DEF_TRIGGER, 12, w);
+      kalSummary(b, sizeof(b), "udrzeni", sh, LD_DEF_HOLD, 12, w);
+      CHECK(std::string(a) == "sepnuti citlivejsi o 1-5 (12 bran), mene citlive o 3 (0,7-1,4 m)" && !w, "shrnuti sepnuti ze screenshotu");
+      CHECK(std::string(b) == "udrzeni citlivejsi o 1-5 (10 bran), mene citlive o 3 (0,7-1,4 m)", "shrnuti udrzeni ze screenshotu");
+      uint8_t v[16];
+      for (int g = 0; g < 16; g++) v[g] = LD_DEF_TRIGGER[g] - (g < 6 ? 12 : 0) + (g >= 6 ? 15 : 0);
+      w = false; kalSummary(a, sizeof(a), "sepnuti", v, LD_DEF_TRIGGER, 12, w);
+      CHECK(w && std::string(a) == "sepnuti POZOR citlivejsi o 12 (0-4,2 m), POZOR mene citlive o 15 (4,2-9,1 m)", "POZOR v metrech");
+      // nejdelsi mozne shrnuti: s hlavickou a jmenem se vejde do zpravy v kanalu (aplikace zobrazi 139 znaku)
+      for (int g = 0; g < 16; g++) v[g] = g < 6 ? 0 : 99;
+      w = false; kalSummary(a, sizeof(a), "udrzeni", v, LD_DEF_HOLD, 12, w);
+      std::string longest = std::string("dum-radar-12: kalibrace POZOR: ") + a;
+      CHECK(longest.size() <= 139, "nejdelsi shrnuti do 139 znaku");
     }
 
     // navrat na vychozi prahy
