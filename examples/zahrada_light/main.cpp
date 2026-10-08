@@ -37,9 +37,11 @@ public:
   }
 
 protected:
+  uint32_t light_seq = 0;   // pocet rozsviceni po LON od zapnuti uzlu
   /* ========================== custom logic here ========================== */
   // Zahradni svetlo. Prikazy (velikost pismen nehraje roli):
-  //   LON     -> svetlo sviti LIGHT_ON_SECS sekund (vychozi 5 s), pak samo zhasne
+  //   LON     -> svetlo sviti LIGHT_ON_SECS sekund (vychozi 5 s), pak samo zhasne; odpoved "ON 5s c.3 bat=3.95V"
+  //              (c. = poradove cislo rozsviceni od zapnuti uzlu)
   //   LOFF    -> svetlo hned zhasne
   //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
   //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
@@ -59,7 +61,8 @@ protected:
     if (strcmp(cmd, "lon") == 0) {
       lightTimerStart();                  // (znovu) spustit odpocet
       board.setGpio(board.getGpio() | 1);
-      sprintf(reply, "ON %ds", LIGHT_ON_SECS);
+      light_seq++;                        // poradove cislo rozsviceni od zapnuti uzlu (jen v RAM)
+      sprintf(reply, "ON %ds c.%u bat=%.2fV", LIGHT_ON_SECS, (unsigned)light_seq, battVolts());
       return true;
     }
     if (strcmp(cmd, "loff") == 0) {

@@ -34,7 +34,7 @@ int main() {
   CHECK(cli(m, 0, "CHAN 00112233445566778899aabbccddeeff") .rfind("OK chan ON hash=", 0) == 0, "chan 32 hex");
   CHECK(cli(m, 0, "chan 0011") .rfind("Err", 0) == 0, "kratky klic odmitnut");
   CHECK(cli(m, 0, "chan") .rfind("chan ON", 0) == 0, "chan stav ON");
-  CHECK(cli(m, 0, "LON  ") == "ON 5s", "LON velkymi + mezery");
+  CHECK(cli(m, 0, "LON  ").rfind("ON 5s c.1 bat=", 0) == 0, "LON velkymi + mezery, poradove cislo a napeti");
   CHECK(board.light_state == 1, "LON rozsvitil");
   CHECK(cli(m, 0, "loff") == "OFF", "loff");
   CHECK(board.light_state == 0, "LOFF zhasl");
@@ -70,7 +70,8 @@ int main() {
   g_sent.clear();
   uint32_t T = 1800001000;
   chanMsg(m, T, "Jirka: LON");             CHECK(board.light_state == 1, "kanal LON pro vsechny");
-  CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: ON 5s", "odpoved do kanalu");
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: ON 5s c." + std::to_string(m.light_seq) + " bat=3.90V", "odpoved do kanalu s cislem rozsviceni a napetim");
+  { uint32_t n = m.light_seq; cli(m, 0, "lon"); CHECK(m.light_seq == n + 1, "kazde LON zvysi poradove cislo o 1"); cli(m, 0, "loff"); }
   CHECK(g_sent[0].delay == 600, "zpozdeni svetla 1");
   CHECK(m.rtc.t >= T, "hodiny srovnany podle kanalu");
   board.setGpio(0);

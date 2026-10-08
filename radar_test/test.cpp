@@ -84,6 +84,7 @@ struct UartMock {
 static int fails = 0, checks = 0;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; printf("FAIL: %s  (line %d)\n", msg, __LINE__); } } while(0)
 
+static std::string lt(uint32_t t) { char b[12]; localTimeStr(t, b); return b; }
 mesh::MainBoard mb; mesh::Radio mr; mesh::MillisecondClock mc; mesh::RNG rg; mesh::RTCClock rc; mesh::MeshTables mt;
 
 static void chanMsg(MyMesh& m, uint32_t ts, const char* txt) {
@@ -102,6 +103,13 @@ static std::string cli(MyMesh& m, uint32_t ts, const char* c) {
 static void pulse(MyMesh& m) { m.radarLoop(true); lightTimerLoop(); m.radarLoop(false); }
 
 int main() {
+  // mistni cas ve zpravach: CET/CEST podle pravidla EU
+  CHECK(lt(1000) == "cas?", "nesrovnane hodiny");
+  CHECK(lt(1774745999) == "01:59:59" && lt(1774746000) == "03:00:00", "prechod na letni cas 29. 3. 2026");
+  CHECK(lt(1792889999) == "02:59:59" && lt(1792890000) == "02:00:00", "prechod na zimni cas 25. 10. 2026");
+  CHECK(lt(1835479800) == "00:30:00", "prestupny rok, zimni cas");
+  CHECK(lt(1798759800) == "00:30:00", "konec roku");
+
   MyMesh m(mb, mr, mc, rg, rc, mt);
   strcpy(m.prefs.node_name, "dum-radar");
   g_millis = 1000;
@@ -169,7 +177,7 @@ int main() {
   // --- hlidani zapnute, svetlo vypnute ---
   cli(m, 0, "svetlo off"); cli(m, 0, "radar on");
   g_millis = 10000; pulse(m);
-  CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: POHYB! bat=3.90V", "prvni pohyb -> zprava hned");
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: POHYB! c.1 09:00:00 bat=3.90V", "prvni pohyb -> zprava hned s cislem a mistnim casem");
   CHECK(g_sent[0].delay < 1000, "poplach bez zbytecneho zpozdeni");
   CHECK(board.light_state == 0, "SVETLO OFF: nesviti");
   m.radarLoop(true); m.radarLoop(true);   // 2. pohyb (OUT znovu HIGH)
@@ -183,11 +191,11 @@ int main() {
   g_millis = 69999; m.radarLoop(false);
   CHECK(g_sent.size() == 1, "v 59,999 s porad nic");
   g_millis = 70000; m.radarLoop(false);
-  CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: POHYB! 3x za 60s, bat=3.90V", "po 60 s souhrn pohybu");
+  CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: POHYB! c.2 09:00:00 3x za 60s bat=3.90V", "po 60 s souhrn pohybu");
   g_millis = 200000; m.radarLoop(false);
   CHECK(g_sent.size() == 2, "bez noveho pohybu uz nic");
   g_millis = 200001; pulse(m);
-  CHECK(g_sent.size() == 3 && g_sent[2].text == "dum-radar: POHYB! bat=3.90V", "pohyb po klidu -> hned zprava");
+  CHECK(g_sent.size() == 3 && g_sent[2].text == "dum-radar: POHYB! c.3 09:00:00 bat=3.90V", "pohyb po klidu -> hned zprava");
 
   // --- svetlo pri pohybu na 3 s ---
   cli(m, 0, "svetlo on");
@@ -493,14 +501,14 @@ int main() {
     CHECK(g_sent.back().text == "dum-radar-1: radar pripraven (RADAR ON, SVETLO OFF)" && g_sent.back().delay == 0, "konec warm-upu, radar 1 bez zpozdeni");
     g_sent.clear();
     g_millis += 1000; pulse(c);
-    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! bat=4.00V", "pohyb po warm-upu, napeti s korekci");
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! c.1 12:52:31 bat=4.00V", "pohyb po warm-upu, napeti s korekci");
     g_millis += 60000; pulse(c);
     g_millis += 59999; c.radarLoop(false);
     CHECK(g_sent.size() == 1, "pauza 120 s: po 60 s jeste nic");
     g_millis += 1; c.radarLoop(false);
-    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! bat=4.00V", "po 120 s dalsi zprava");
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! c.2 12:52:31 bat=4.00V", "po 120 s dalsi zprava");
     g_millis += 120000; pulse(c); g_millis += 10000; pulse(c); g_millis += 10000; pulse(c); g_millis += 100000; c.radarLoop(false);
-    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! 2x za 120s, bat=4.00V", "souhrn uvadi nastavenou pauzu");
+    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! c.4 12:52:31 2x za 120s bat=4.00V", "souhrn uvadi nastavenou pauzu");
 
     // baterie s korekci: 3,41 V z ADC x 1,026 = 3,50 V -> uz neni slaba
     g_sent.clear();

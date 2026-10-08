@@ -319,6 +319,8 @@ protected:
   bool ready_warn_sent = false;   // zprava "pripraven za 60 s" uz odesla
   bool ready_sent = false;        // zprava "pripraven" uz odesla
   uint32_t motion_count = 0;      // pocet pohybu od zapnuti hlidani
+  uint32_t alarm_seq = 0;         // poradove cislo zpravy POHYB! od zapnuti uzlu (jen v RAM)
+  uint32_t alarm_first_ts = 0;    // UTC prvniho pohybu, ktery jeste neni ve zprave
   uint32_t motion_last = 0;       // millis() posledniho pohybu
   bool alarm_sent_once = false;
   uint32_t alarm_last = 0;        // millis() posledni zpravy o pohybu
@@ -380,18 +382,22 @@ public:
     if (rising && radar_on && !settling && !kal) {
       motion_count++;
       motion_last = millis();
+      if (alarm_pending == 0) alarm_first_ts = getRTCClock()->getCurrentTime();
       alarm_pending++;
       if (light_on) lightPulse();
     }
     // zprava hned pri prvnim pohybu, dalsi az po pauze (PAUZA, vychozi ALARM_COOLDOWN_SECS) s poctem pohybu mezi tim
     if (radar_on && alarm_pending > 0 &&
         (!alarm_sent_once || (uint32_t)(millis() - alarm_last) >= (uint32_t)cooldown_secs * 1000UL)) {
-      char body[64];
+      // "POHYB! c.3 12:05:31 bat=3.95V", souhrn "POHYB! c.4 12:06:40 3x za 60s bat=3.95V" (cas = prvni pohyb)
+      char body[72], when[12];
+      localTimeStr(alarm_first_ts, when);
+      alarm_seq++;
       if (alarm_pending > 1) {
-        snprintf(body, sizeof(body), "POHYB! %ux za %us, bat=%.2fV", (unsigned)alarm_pending,
-                 (unsigned)cooldown_secs, battVolts());
+        snprintf(body, sizeof(body), "POHYB! c.%u %s %ux za %us bat=%.2fV", (unsigned)alarm_seq, when,
+                 (unsigned)alarm_pending, (unsigned)cooldown_secs, battVolts());
       } else {
-        snprintf(body, sizeof(body), "POHYB! bat=%.2fV", battVolts());
+        snprintf(body, sizeof(body), "POHYB! c.%u %s bat=%.2fV", (unsigned)alarm_seq, when, battVolts());
       }
       sendChannelText(body, 0);   // bez kanalu se zprava zahodi (nehromadit stare poplachy)
       alarm_sent_once = true;

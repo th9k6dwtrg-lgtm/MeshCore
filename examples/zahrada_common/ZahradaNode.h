@@ -37,6 +37,31 @@ static void uptimeLoop() {
   uptime_last = now;
 }
 
+// ---------- mistni cas (CET/CEST) pro zpravy ----------
+// Hodiny uzlu jsou UTC a srovnaji se podle casu v prijatych zpravach. Letni cas plati
+// od posledni nedele v breznu 01:00 UTC do posledni nedele v rijnu 01:00 UTC (pravidlo EU).
+static int32_t daysFromCivil(int y, int m, int d) {   // dny od 1. 1. 1970
+  y -= m <= 2;
+  int era = y / 400;
+  int yoe = y - era * 400;
+  int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+static uint32_t lastSundayUtc(int y, int m) {   // posledni nedele mesice (brezen, rijen) v 01:00 UTC
+  int32_t ld = daysFromCivil(y, m, 31);
+  return (uint32_t)(ld - (ld + 4) % 7) * 86400UL + 3600UL;
+}
+// "HH:MM:SS" mistniho casu, "cas?" dokud hodiny nejsou srovnane
+static void localTimeStr(uint32_t utc, char* out) {
+  if (utc < 1704067200UL) { strcpy(out, "cas?"); return; }   // pred 1. 1. 2024 = hodiny nesrovnane
+  int y = 1970 + (int)(utc / 31556952UL);                     // rok (pripadne o 1 vic, opravi se nize)
+  if ((uint32_t)daysFromCivil(y, 1, 1) * 86400UL > utc) y--;
+  bool dst = utc >= lastSundayUtc(y, 3) && utc < lastSundayUtc(y, 10);
+  uint32_t t = (utc + (dst ? 7200UL : 3600UL)) % 86400UL;
+  sprintf(out, "%02u:%02u:%02u", (unsigned)(t / 3600), (unsigned)(t / 60 % 60), (unsigned)(t % 60));
+}
+
 // ---------- upozorneni na slabou baterii ----------
 #ifndef BATT_LOW_MV
   #define BATT_LOW_MV     3500   // "baterie slaba"
