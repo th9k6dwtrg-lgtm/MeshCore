@@ -11,7 +11,8 @@ Firmware pro **Seeed XIAO nRF52840 + Wio-SX1262** s mmWave radarem **HLK-LD2410S
  XIAO 3V3 ────────────────────────► LD2410S 3V3   (jen 3,3 V, 5 V radar zničí)
  XIAO GND ────────────────────────► LD2410S GND
  XIAO D7  ◄──────────────────────── LD2410S OT2   (na desce „OT2“, HIGH = přítomnost)
-                                    LD2410S OT1 (= UART TX), RX: nezapojeno
+ XIAO NFC1 (P0.09) ◄─────────────── LD2410S OT1   (= UART TX radaru)    jen pro kalibraci
+ XIAO NFC2 (P0.10) ────────────────► LD2410S RX                          a čtení prahů
 
  XIAO D6 ── 330 Ω ──►|── GND        testovací LED (anoda k rezistoru)
                                     později MOSFET stejně jako u zahradních světel
@@ -19,7 +20,7 @@ Firmware pro **Seeed XIAO nRF52840 + Wio-SX1262** s mmWave radarem **HLK-LD2410S
 
 - **Nabíjení:** XIAO má vlastní nabíječku Li-Ion z USB-C (výchozí 50 mA). Pro solár jde použít stejné řešení jako u světel (CN3065 + BMS) nebo TP4056 s ochranou; nenechávat dvě nabíječky trvale na jednom článku.
 - **Měření napětí:** dělič je na desce XIAO (1 MΩ / 510 kΩ na P0.31), firmware ho čte přes `board.getBattMilliVolts()`. Externí dělič není potřeba. ADC je nekalibrované (u světel ukazovalo asi o 0,15 V méně).
-- **Piny:** D1–D5 a D8–D10 rádio, D0 tlačítko, D6 světlo, D7 radar.
+- **Piny:** D1–D5 a D8–D10 rádio, D0 tlačítko, D6 světlo, D7 radar. UART radaru je na **NFC padech** na spodní straně XIAO (NFC1 a NFC2, vedle padů baterie). Firmware je přepne na obyčejné piny (`CONFIG_NFCT_PINS_AS_GPIOS`; při prvním startu se to jednou zapíše do čipu a XIAO se samo restartuje). Bez zapojení UART vše funguje dál, jen `RADAR KALIBRACE` a `RADAR PRAHY` odpoví chybou.
 - **Odběr (odhad, neměřeno):** jako světlo bez MT3608, tj. asi 8–12 mA (rádio musí stále poslouchat) + LD2410S. Jeden článek 3400 mAh tedy zhruba 2 týdny bez dobíjení.
 
 ## Příkazy
@@ -32,6 +33,8 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 | `SVETLO ON` / `SVETLO OFF` | zapne / vypne rozsvícení na 3 s při pohybu | `dum-radar: SVETLO ON` |
 | `SVETLO TEST` | rozsvítí na 3 s | `dum-radar: SVETLO TEST 3s` |
 | `STATUS RADAR` | stav radaru | `dum-radar: RADAR ON SVETLO OFF ot2=0/7 pohyb=3 (5m) bat=3.95V rssi=-60 snr=9.5 up=0d02h15m` |
+| `RADAR KALIBRACE` | za 60 s spustí automatické prahy radaru, sken 15 min (`RADAR KALIBRACE 20m` = 20 min, 2–60) | `dum-radar: KALIBRACE za 60s, sken 15 min - odejdi z dosahu` |
+| `RADAR PRAHY` | přečte prahy radaru pro brány 0–15 (T = sepnutí, H = udržení; vyšší = méně citlivé) | `dum-radar: prahy T 48 42 … H 45 42 …` |
 | `STATUS` | odpoví všechny uzly v kanálu, radar až po světlech 1–4 (6,6 s) | jako výše |
 
 - `ot2` = okamžitý stav výstupu radaru (1 = přítomnost) / počet jeho sepnutí od startu (počítá i při RADAR OFF, slouží k testu radaru). `pohyb` = počet pohybů od `RADAR ON`, v závorce kdy byl poslední. `rssi/snr` = poslední přijatý paket (tj. tento příkaz, od nejbližšího souseda).
@@ -49,6 +52,9 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 Stejně jako světlo: `ver`, `get radio`, `set name dum-radar`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `SVETLO TEST`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.
 
 Heslo ani klíč kanálu nepatří do kódu (repozitář je veřejný).
+
+## Kalibrace přes mesh
+`RADAR KALIBRACE` (v kanálu i přes CLI) zapne UART radaru a ověří, že odpovídá. Pak má člověk 60 s (`RADAR_KAL_DELAY_SECS`) na odchod z dosahu, radar dostane příkaz automatických prahů (0x0009, faktory 2 a 1 jako nástroj Hi-Link, doba skenu v sekundách) a sám si změří prázdný prostor. Po uplynutí skenu + 20 s firmware přečte nové prahy, pošle je do kanálu (`kalibrace hotova T … H …`) a UART zase vypne (šetří baterii). Během čekání i skenu se pohyb nehlásí; `STATUS` ukazuje `kal=start` a pak průběh hlášený radarem. Během skenu nesmí nikdo projít ani projet a výsledek je dobré zkontrolovat (`RADAR PRAHY`, průchod před radarem, `ot2` ve `STATUS`).
 
 ## Nastavení radaru
 Dosah, citlivost a doba držení OT2 se nastavují přes UART radaru (115200 Bd) programem HLK-LD2410S_TOOL na PC. Radar odpojit od XIAO a připojit na USB-UART převodník přepnutý na **3,3 V** (např. LaskaKit CH9102): VCC → 3V3, GND → GND, TX převodníku → RX radaru, RX převodníku → OT1 radaru. Delší doba držení = méně opakovaných pohybů. Pro první zkoušku stačí výchozí nastavení.

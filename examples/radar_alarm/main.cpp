@@ -6,7 +6,8 @@
 #endif
 
 // Hlidaci cidlo s mmWave radarem HLK-LD2410S na XIAO nRF52840 + Wio-SX1262.
-// Zapojeni: LD2410S 3V3/GND na 3V3/GND XIAO, LD2410S OT2 -> D7 (HIGH = pritomnost), OT1 (TX) a RX nezapojene,
+// Zapojeni: LD2410S 3V3/GND na 3V3/GND XIAO, LD2410S OT2 -> D7 (HIGH = pritomnost),
+//           volitelne pro kalibraci: OT1 (TX radaru) -> NFC1 pad (P0.09), NFC2 pad (P0.10) -> RX radaru,
 //           D6 -> svetlo (pro test LED pres 330 R na GND, pozdeji MOSFET jako u zahradnich svetel).
 // Ovladani a upozorneni jdou stejne jako u zahradnich svetel pres soukromy kanal MeshCore.
 
@@ -78,6 +79,147 @@ static void uptimeLoop() {
   uptime_last = now;
 }
 
+// ---------- UART radaru LD2410S: kalibrace (automaticke prahy) a cteni prahu ----------
+// Protokol "HLK-LD2410S serial communication protocol V1.00": 115200 Bd, prikaz FD FC FB FA | delka | slovo | data | 04 03 02 01,
+// datove ramce F4 F3 F2 F1 | delka | data | F8 F7 F6 F5. Zapojeni: OT1 (TX radaru) -> PIN_RADAR_UART_RX,
+// PIN_RADAR_UART_TX -> RX radaru (NFC pady XIAO, D6/D7 zustavaji pro svetlo a OT2).
+// UART bezi jen behem kalibrace / cteni prahu (setri baterii).
+#ifndef RADAR_KAL_MINUTES
+  #define RADAR_KAL_MINUTES     15   // vychozi doba skenovani prostoru
+#endif
+#ifndef RADAR_KAL_DELAY_SECS
+  #define RADAR_KAL_DELAY_SECS  60   // po prikazu cas odejit z dosahu radaru, pak teprve sken
+#endif
+#define RADAR_KAL_GRACE_MS      20000UL   // po uplynuti skenu jeste pockat na radar, pak precist prahy
+#define RADAR_KAL_TRIGGER_FACTOR  2       // parametry prikazu 0x0009 jako v nastroji Hi-Link
+#define RADAR_KAL_HOLD_FACTOR     1
+#define LD_GATES  16
+
+#ifdef PIN_RADAR_UART_RX
+#ifndef RADAR_UART
+  #define RADAR_UART  Serial1
+#endif
+class LD2410S {
+  uint8_t buf[96];
+  int n = 0;
+
+  // vraci delku dat ramce (bez hlavicky, delky a konce) nebo -1, kdyz zatim neni cely ramec
+  int rx(uint8_t* p, int max, bool& is_ack) {
+    static const uint8_t A[4] = {0xFD, 0xFC, 0xFB, 0xFA}, D[4] = {0xF4, 0xF3, 0xF2, 0xF1};
+    while (RADAR_UART.available()) {
+      uint8_t c = RADAR_UART.read();
+      if (n < 4) {   // hledani hlavicky (minimalni ramce 6E .. 62 se tim preskoci)
+        const uint8_t* h = (n > 0 && buf[0] == 0xF4) ? D : A;
+        if (n == 0 && c == 0xF4) h = D;
+        if (c == h[n]) buf[n++] = c;
+        else { n = 0; if (c == 0xFD || c == 0xF4) buf[n++] = c; }
+        continue;
+      }
+      buf[n++] = c;
+      if (n >= 6) {
+        int len = buf[4] | (buf[5] << 8);
+        if (len > (int)sizeof(buf) - 10) { n = 0; continue; }
+        if (n == 6 + len + 4) {
+          n = 0;
+          is_ack = buf[0] == 0xFD;
+          int m = len < max ? len : max;
+          memcpy(p, &buf[6], m);
+          return m;
+        }
+      }
+    }
+    return -1;
+  }
+
+  void dataFrame(const uint8_t* p, int l) {
+    // prubeh automatickych prahu: typ 0x03, posledni 2 bajty = prubeh
+    if (l >= 3 && p[0] == 0x03) progress = p[l - 2] | (p[l - 1] << 8);
+  }
+
+public:
+  int progress = -1;   // posledni hlaseny prubeh automatickych prahu (-1 = zatim nic)
+
+  void begin() {
+    RADAR_UART.setPins(PIN_RADAR_UART_RX, PIN_RADAR_UART_TX);
+    RADAR_UART.begin(115200);
+    while (RADAR_UART.available()) RADAR_UART.read();
+    n = 0;
+    progress = -1;
+  }
+  void end() { RADAR_UART.end(); }
+
+  // posle prikaz a pocka na potvrzeni (3 pokusy po 300 ms); data odpovedi za stavem do out
+  bool command(uint16_t cmd, const uint8_t* data, int dlen, uint8_t* out = NULL, int out_max = 0) {
+    uint8_t f[4 + 2 + 2 + 6 * LD_GATES + 4];
+    int fl = 0;
+    memcpy(f, "\xFD\xFC\xFB\xFA", 4); fl = 4;
+    f[fl++] = (uint8_t)(dlen + 2); f[fl++] = 0;
+    f[fl++] = cmd & 0xFF; f[fl++] = cmd >> 8;
+    memcpy(&f[fl], data, dlen); fl += dlen;
+    memcpy(&f[fl], "\x04\x03\x02\x01", 4); fl += 4;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      RADAR_UART.write(f, fl);
+      uint32_t t0 = millis();
+      while ((uint32_t)(millis() - t0) < 300) {
+        uint8_t p[80];
+        bool ack = false;
+        int l = rx(p, sizeof(p), ack);
+        if (l < 0) continue;
+        if (!ack) { dataFrame(p, l); continue; }
+        if (l < 4 || (p[0] | (p[1] << 8)) != (cmd | 0x0100)) continue;
+        if (p[2] | p[3]) return false;   // radar prikaz odmitl
+        if (out) memcpy(out, &p[4], (l - 4) < out_max ? (l - 4) : out_max);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool configOn()  { static const uint8_t d[2] = {0x01, 0x00}; return command(0x00FF, d, 2); }
+  bool configOff() { return command(0x00FE, NULL, 0); }
+
+  // prahy pro vsech 16 bran: 0x0073 = trigger (sepnuti), 0x0077 = hold (udrzeni)
+  bool readThresholds(uint16_t cmd, uint8_t vals[LD_GATES]) {
+    uint8_t d[2 * LD_GATES], out[4 * LD_GATES];
+    for (int g = 0; g < LD_GATES; g++) { d[2 * g] = g; d[2 * g + 1] = 0; }
+    if (!command(cmd, d, sizeof(d), out, sizeof(out))) return false;
+    for (int g = 0; g < LD_GATES; g++) vals[g] = out[4 * g];
+    return true;
+  }
+
+  bool startAuto(uint16_t scan_secs) {
+    uint8_t d[6] = {RADAR_KAL_TRIGGER_FACTOR, 0, RADAR_KAL_HOLD_FACTOR, 0,
+                    (uint8_t)(scan_secs & 0xFF), (uint8_t)(scan_secs >> 8)};
+    if (!configOn()) return false;
+    bool ok = command(0x0009, d, sizeof(d));
+    configOff();   // prubeh radar posila az mimo konfiguracni rezim
+    return ok;
+  }
+
+  // precte oba radky prahu ("T 48 42 ... H 45 42 ...")
+  bool thresholdsText(char* dest, size_t max) {
+    uint8_t t[LD_GATES], h[LD_GATES];
+    if (!configOn()) return false;
+    bool ok = readThresholds(0x0073, t) && readThresholds(0x0077, h);
+    configOff();
+    if (!ok) return false;
+    int p = snprintf(dest, max, "T");
+    for (int g = 0; g < LD_GATES && p < (int)max; g++) p += snprintf(dest + p, max - p, " %u", t[g]);
+    if (p < (int)max) p += snprintf(dest + p, max - p, " H");
+    for (int g = 0; g < LD_GATES && p < (int)max; g++) p += snprintf(dest + p, max - p, " %u", h[g]);
+    return true;
+  }
+
+  // zpracuje prichozi datove ramce (behem kalibrace)
+  void poll() {
+    uint8_t p[80];
+    bool ack;
+    int l;
+    while ((l = rx(p, sizeof(p), ack)) >= 0) if (!ack) dataFrame(p, l);
+  }
+};
+#endif
+
 // ---------- upozorneni na slabou baterii ----------
 #ifndef BATT_LOW_MV
   #define BATT_LOW_MV     3500   // "baterie slaba"
@@ -127,6 +269,15 @@ protected:
   bool alarm_sent_once = false;
   uint32_t alarm_last = 0;        // millis() posledni zpravy o pohybu
   uint32_t alarm_pending = 0;     // pohyby od posledni odeslane zpravy
+
+  // kalibrace (automaticke prahy radaru pres UART)
+  enum { KAL_IDLE, KAL_WAIT, KAL_SCAN };
+  uint8_t kal_state = KAL_IDLE;
+  uint32_t kal_t0 = 0;            // millis() prikazu (KAL_WAIT) / zacatku skenu (KAL_SCAN)
+  uint16_t kal_minutes = RADAR_KAL_MINUTES;
+#ifdef PIN_RADAR_UART_RX
+  LD2410S ld;
+#endif
 
   mesh::GroupChannel light_chan;
   bool light_chan_ok = false;
@@ -227,6 +378,7 @@ public:
     if (rising) ot2_edges++;
     uint32_t since_start = (uint32_t)(millis() - radar_start);
     bool settling = since_start < RADAR_STARTUP_MS;
+    bool kal = kal_state != KAL_IDLE;   // behem kalibrace se pohyb (odchod z dosahu) nehlasi
 
     // po startu do kanalu: 60 s pred koncem ustalovani a pri jeho konci (jednou, at je jasne, kdy radar hlida)
     if (!ready_warn_sent && RADAR_STARTUP_SECS > RADAR_READY_WARN_SECS &&
@@ -243,7 +395,7 @@ public:
       ready_warn_sent = ready_sent = true;
     }
 
-    if (rising && radar_on && !settling) {
+    if (rising && radar_on && !settling && !kal) {
       motion_count++;
       motion_last = millis();
       alarm_pending++;
@@ -266,9 +418,81 @@ public:
     }
   }
 
+  // ---------- kalibrace: volat v kazdem pruchodu loop() ----------
+  void radarKalLoop() {
+#ifdef PIN_RADAR_UART_RX
+    if (kal_state == KAL_IDLE) return;
+    uint32_t el = (uint32_t)(millis() - kal_t0);
+    if (kal_state == KAL_WAIT) {
+      if (el < RADAR_KAL_DELAY_SECS * 1000UL) return;
+      if (!ld.startAuto(kal_minutes * 60)) {
+        ld.end();
+        kal_state = KAL_IDLE;
+        sendChannelText("kalibrace CHYBA: radar neodpovida", 0);
+        return;
+      }
+      kal_state = KAL_SCAN;
+      kal_t0 = millis();
+      return;
+    }
+    ld.poll();   // prubeh skenu (jen pro STATUS; jednotku protokol jasne neuvadi, konec se ridi casem)
+    if (el < kal_minutes * 60000UL + RADAR_KAL_GRACE_MS) return;
+    char body[120];
+    strcpy(body, "kalibrace hotova ");
+    if (!ld.thresholdsText(&body[strlen(body)], sizeof(body) - strlen(body)))
+      strcpy(body, "kalibrace CHYBA: prahy nejdou precist");
+    ld.end();
+    kal_state = KAL_IDLE;
+    sendChannelText(body, 0);
+#endif
+  }
+
 protected:
+  bool execKalibrace(const char* cmd, char* reply) {
+#ifdef PIN_RADAR_UART_RX
+    if (strncmp(cmd, "radar kalibrace", 15) == 0) {
+      if (kal_state != KAL_IDLE) { strcpy(reply, "KALIBRACE uz bezi"); return true; }
+      int mins = RADAR_KAL_MINUTES;
+      if (cmd[15] == ' ') {   // volitelne "20m"
+        mins = atoi(&cmd[16]);
+        if (mins < 2 || mins > 60) { strcpy(reply, "Err - doba 2m az 60m"); return true; }
+      } else if (cmd[15] != 0) {
+        return false;
+      }
+      ld.begin();
+      bool ok = ld.configOn() && ld.configOff();   // radar odpovida?
+      if (!ok) {
+        ld.end();
+        strcpy(reply, "Err - radar neodpovida (UART)");
+        return true;
+      }
+      kal_minutes = mins;
+      kal_state = KAL_WAIT;
+      kal_t0 = millis();
+      sprintf(reply, "KALIBRACE za %ds, sken %d min - odejdi z dosahu", RADAR_KAL_DELAY_SECS, mins);
+      return true;
+    }
+    if (strcmp(cmd, "radar prahy") == 0) {
+      if (kal_state != KAL_IDLE) { strcpy(reply, "KALIBRACE bezi, prahy az po ni"); return true; }
+      ld.begin();
+      char t[110];
+      if (ld.thresholdsText(t, sizeof(t))) sprintf(reply, "prahy %s", t);
+      else strcpy(reply, "Err - radar neodpovida (UART)");
+      ld.end();
+      return true;
+    }
+#else
+    if (strncmp(cmd, "radar kalibrace", 15) == 0 || strcmp(cmd, "radar prahy") == 0) {
+      strcpy(reply, "Err - build bez UART radaru");
+      return true;
+    }
+#endif
+    return false;
+  }
+
   // provede prikaz radaru; cmd uz je malymi pismeny, bez cisel uzlu
   bool execRadar(const char* cmd, char* reply) {
+    if (execKalibrace(cmd, reply)) return true;
     if (strcmp(cmd, "radar on") == 0) {
       if (!radar_on) { motion_count = 0; alarm_pending = 0; alarm_sent_once = false; }
       radar_on = true;
@@ -319,6 +543,13 @@ protected:
               (int)radio_driver.getLastRSSI(),
               radio_driver.getLastSNR(),
               (unsigned)(up_min / 1440), (unsigned)((up_min / 60) % 24), (unsigned)(up_min % 60));
+#ifdef PIN_RADAR_UART_RX
+      if (kal_state == KAL_WAIT) strcat(reply, " kal=start");
+      else if (kal_state == KAL_SCAN) {
+        if (ld.progress >= 0) sprintf(&reply[strlen(reply)], " kal=%d", ld.progress);
+        else strcat(reply, " kal=sken");
+      }
+#endif
       return true;
     }
     return false;
@@ -481,22 +712,34 @@ protected:
     char* save = NULL;
     char* word = strtok_r(cmd, " ", &save);
     if (word == NULL) return;
-    char action[24];
-    if (strcmp(word, "radar") == 0 || strcmp(word, "svetlo") == 0) {
-      char* sub = strtok_r(NULL, " ,", &save);
+    char action[32];
+    char* t = NULL;   // prvni token za prikazem (cile)
+    if (strcmp(word, "radar") == 0 && (t = strtok_r(NULL, " ,", &save)) != NULL &&
+        (strcmp(t, "kalibrace") == 0 || strcmp(t, "prahy") == 0)) {
+      // "RADAR KALIBRACE [20m] [cile]", "RADAR PRAHY [cile]"
+      snprintf(action, sizeof(action), "radar %s", t);
+      t = strtok_r(NULL, " ,", &save);
+      int tl = t ? strlen(t) : 0;
+      if (tl >= 2 && t[tl - 1] == 'm' && isdigit((unsigned char)t[0]) && strcmp(action, "radar kalibrace") == 0) {
+        snprintf(&action[strlen(action)], sizeof(action) - strlen(action), " %s", t);
+        t = strtok_r(NULL, " ,", &save);
+      }
+    } else if (strcmp(word, "radar") == 0 || strcmp(word, "svetlo") == 0) {
+      char* sub = (strcmp(word, "radar") == 0) ? t : strtok_r(NULL, " ,", &save);
       if (sub == NULL) return;
       if (strcmp(sub, "on") && strcmp(sub, "off") && strcmp(sub, "test")) return;
       if (strcmp(word, "radar") == 0 && strcmp(sub, "test") == 0) return;
       snprintf(action, sizeof(action), "%s %s", word, sub);
+      t = strtok_r(NULL, " ,", &save);
     } else if (strcmp(word, "status") == 0) {
       strcpy(action, "status");
+      t = strtok_r(NULL, " ,", &save);
     } else {
       return;   // neni pro nas (LON/LOFF svetel, odpovedi ostatnich uzlu, bezne zpravy)
     }
 
     int me = nodeNumber();
     bool for_me = true, for_all = true;
-    char* t = strtok_r(NULL, " ,", &save);
     if (t != NULL) {
       for_me = false; for_all = false;
       for (; t != NULL; t = strtok_r(NULL, " ,", &save)) {
@@ -648,6 +891,7 @@ void loop() {
 
   the_mesh.loop();
   the_mesh.radarLoop(digitalRead(PIN_RADAR_OUT) == HIGH);
+  the_mesh.radarKalLoop();
   lightTimerLoop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
