@@ -342,6 +342,16 @@ int main() {
     CHECK(cli(k, 0, "radar prahy x") == "<NEZPRACOVANO>", "RADAR PRAHY x neni prikaz");
     CHECK(!radar_uart.open && !radar_uart.config, "po cteni prahu UART vypnuty, radar mimo konfiguraci");
     CHECK(radar_uart.rx_pin == 30 && radar_uart.tx_pin == 31, "UART na pinech NFC");
+    {   // po RADAR PRAHY radar opousti konfiguracni rezim a OT2 muze znovu sepnout: to neni pohyb
+      g_sent.clear(); k.light_on = true; board.setGpio(0);
+      cli(k, 0, "radar prahy");
+      uint32_t t = g_millis;
+      pulse(k);
+      CHECK(g_sent.empty() && board.light_state == 0, "OT2 hned po UART: zadny poplach ani svetlo");
+      g_millis = t + RADAR_UART_QUIET_MS; pulse(k);
+      CHECK(g_sent.size() == 1 && g_sent[0].text.find("POHYB!") != std::string::npos, "po 5 s zase hlida");
+      k.light_on = false; board.setGpio(0); g_millis += 100000; k.radarLoop(false);
+    }
     CHECK(cli(k, 0, "radar kalibrace 1m") == "Err - doba 2m az 60m", "kratka doba odmitnuta");
     CHECK(cli(k, 0, "radar kalibracex") == "<NEZPRACOVANO>", "preklep neni prikaz");
 
@@ -381,6 +391,8 @@ int main() {
     CHECK(!radar_uart.open && k.kal_state == MyMesh::KAL_IDLE, "po kalibraci UART vypnuty");
     CHECK(cli(k, 0, "status").find(" kal=") == std::string::npos, "STATUS bez kal po kalibraci");
     g_millis += 1000; pulse(k);
+    CHECK(g_sent.size() == 2, "hned po kalibraci (UART) se OT2 nevyhodnocuje");
+    g_millis += RADAR_UART_QUIET_MS; pulse(k);
     CHECK(g_sent.size() == 3 && g_sent[2].text.rfind("dum-radar: POHYB!", 0) == 0, "po kalibraci zase hlida");
 
     // kanal: doba a cile

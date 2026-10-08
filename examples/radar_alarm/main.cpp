@@ -65,6 +65,7 @@ static void lightTimerLoop() {
 // az do vypnuti napajeni (videno 8. 10. 2026). Proto se ceka na 100 % a jeste RADAR_KAL_GRACE_MS.
 // Sken trva o neco dele nez zadana doba (120 s -> 124 s), bez hlaseni 100 % se ceka doba + 25 %.
 #define RADAR_KAL_GRACE_MS      20000UL
+#define RADAR_UART_QUIET_MS     5000UL    // po prikazech pres UART 5 s nehlasit pohyb (OT2 muze preblikout)
 #define RADAR_KAL_RETRY_MS      10000UL   // kdyz radar po skenu neodpovi, zkusit znovu za 10 s
 #define RADAR_KAL_TRIES         6         // ... nejvyse 6x
 #define RADAR_KAL_TRIGGER_FACTOR  2       // parametry prikazu 0x0009 jako v nastroji Hi-Link
@@ -338,6 +339,9 @@ protected:
   uint32_t kal_done = 0;          // millis() hlaseni 100 % (0 = zatim ne)
   uint8_t kal_tries = 0;          // neuspesne pokusy o cteni prahu po skenu
   uint32_t kal_retry_t = 0;       // millis() posledniho neuspesneho pokusu
+  bool uart_quiet = false;        // chvili po UART komunikaci s radarem se OT2 nevyhodnocuje
+  uint32_t uart_quiet_t = 0;
+  void uartDone() { uart_quiet = true; uart_quiet_t = millis(); }
 #ifdef PIN_RADAR_UART_RX
   LD2410S ld;
 #endif
@@ -363,6 +367,9 @@ public:
     uint32_t startup_ms = (uint32_t)startup_secs * 1000UL;
     bool settling = since_start < startup_ms;
     bool kal = kal_state != KAL_IDLE;   // behem kalibrace se pohyb (odchod z dosahu) nehlasi
+    // po prikazech pres UART (konfiguracni rezim radaru) muze OT2 kratce spadnout a znovu sepnout: neni to pohyb
+    if (uart_quiet && (uint32_t)(millis() - uart_quiet_t) >= RADAR_UART_QUIET_MS) uart_quiet = false;
+    if (uart_quiet) kal = true;
 
     // po startu do kanalu: 60 s pred koncem ustalovani a pri jeho konci (jednou, at je jasne, kdy radar hlida)
     if (!ready_warn_sent && startup_secs > RADAR_READY_WARN_SECS &&
@@ -414,7 +421,7 @@ public:
     if (kal_state == KAL_WAIT) {
       if (el < RADAR_KAL_DELAY_SECS * 1000UL) return;
       if (!ld.startAuto(kal_minutes * 60)) {
-        ld.end();
+        ld.end(); uartDone();
         kal_state = KAL_IDLE;
         sendChannelText("kalibrace CHYBA: radar neodpovida", slotDelay());
         return;
@@ -439,7 +446,7 @@ public:
     bool ok = ld.readAll(t, h, far_gate);
     if (!ok && ++kal_tries < RADAR_KAL_TRIES) { kal_retry_t = millis(); return; }   // dalsi pokus za 10 s
     int restored = ok ? ld.restoreParams() : 0;
-    ld.end();
+    ld.end(); uartDone();
     kal_state = KAL_IDLE;
     if (!ok) { sendChannelText("kalibrace CHYBA: radar neodpovida, vypni a zapni uzel", slotDelay()); return; }
     char body[160];
@@ -468,7 +475,7 @@ protected:
       ld.begin();
       bool ok = ld.configOn() && ld.configOff();   // radar odpovida?
       if (!ok) {
-        ld.end();
+        ld.end(); uartDone();
         strcpy(reply, "Err - radar neodpovida (UART)");
         return true;
       }
@@ -490,7 +497,7 @@ protected:
       uint8_t t[LD_GATES], h[LD_GATES];
       int far_gate = LD_GATES - 1;
       bool ok = wrote && ld.readAll(t, h, far_gate);
-      ld.end();
+      ld.end(); uartDone();
       if (!ok) { strcpy(reply, "Err - radar neodpovida (UART)"); return true; }
       int p = defaults ? sprintf(reply, "VYCHOZI zapsany, ") : 0;
       thresholdLine(&reply[p], 150 - p, hold ? "udrzeni" : "sepnuti", hold ? h : t,
@@ -587,7 +594,7 @@ protected:
 public:
   void loadRadarState() {
     loadNodeState();   // klic kanalu a BATKAL
-    // po kazdem zapnuti hlida a sviti vypnute, ulozeny stav RADAR/SVETLO ON/OFF se nepouziva
+    // po kazdem zapnuti RADAR ON a SVETLO OFF, ulozeny stav RADAR/SVETLO ON/OFF se nepouziva
     radar_on = RADAR_BOOT_ON;
     light_on = SVETLO_BOOT_ON;
 #if defined(NRF52_PLATFORM)
