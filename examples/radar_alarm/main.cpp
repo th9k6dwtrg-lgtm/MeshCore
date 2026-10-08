@@ -40,7 +40,7 @@ static void lightTimerStart() {
   light_timer_armed = true;
 }
 
-// Hlida dobu svitu: plati pro pohyb, SVETLO RADAR i pro oficialni 'io s 1'.
+// Hlida dobu svitu: plati pro pohyb, RON i pro oficialni 'io s 1'.
 static void lightTimerLoop() {
   if ((board.getGpio() & 1) == 0) { light_timer_armed = false; return; }
   if (!light_timer_armed) lightTimerStart();     // rozsviceno jinak (napr. 'io s 1')
@@ -297,7 +297,7 @@ protected:
   // Radar. Prikazy (velikost pismen nehraje roli):
   //   RADAR ON / RADAR OFF    -> zapne / vypne hlidani (zpravy o pohybu)
   //   SVETLO ON / SVETLO OFF  -> zapne / vypne rozsviceni svetla na LIGHT_PULSE_SECS pri pohybu
-  //   SVETLO RADAR            -> hned rozsviti svetlo na LIGHT_PULSE_SECS (obdoba LON u zahradnich svetel)
+  //   RON                     -> hned rozsviti svetlo na LIGHT_PULSE_SECS (obdoba LON u zahradnich svetel)
   //   STATUS                  -> stav + napeti baterie + sila signalu posledniho paketu + doba behu
   //   WDTTEST / ALERTTEST     -> (jen USB) test watchdogu / zkusebni poplach do kanalu
   //
@@ -308,6 +308,8 @@ protected:
   //       "STATUS"        -> vsechny uzly v kanalu vcetne radaru
   //       "RADAR ON", "SVETLO OFF" ...  -> vsechny radary; "RADAR ON 2" -> jen radar s cislem 2
   //     Radar odpovi do kanalu "<jmeno>: <stav>". Pri pohybu posle "<jmeno>: POHYB! ...".
+  //     Zpravy od uzlu, jejichz jmeno obsahuje "radar" (RADAR 2, dum-radar-2), radar ignoruje: jejich odpovedi
+  //     "RADAR ON" apod. by jinak ostatni radary braly jako prikaz a odpovidaly si navzajem dokola.
   //  Klic kanalu (CHAN) a korekce baterie (BATKAL) jsou spolecne se svetly, viz ZahradaNode.h.
   //  Po kazdem zapnuti zacina s RADAR ON a SVETLO OFF (RADAR_BOOT_ON, SVETLO_BOOT_ON), prikaz plati do vypnuti.
 
@@ -321,6 +323,7 @@ protected:
   bool ready_sent = false;        // zprava "pripraven" uz odesla
   uint32_t motion_count = 0;      // pocet pohybu od zapnuti hlidani
   uint32_t alarm_seq = 0;         // poradove cislo zpravy POHYB! od zapnuti uzlu (jen v RAM)
+  uint32_t ron_seq = 0;           // pocet rozsviceni po RON od zapnuti uzlu (jen v RAM)
   uint32_t alarm_first_ts = 0;    // UTC prvniho pohybu, ktery jeste neni ve zprave
   uint32_t motion_last = 0;       // millis() posledniho pohybu
   bool alarm_sent_once = false;
@@ -396,15 +399,16 @@ public:
     // zprava hned pri prvnim pohybu, dalsi az po pauze (PAUZA, vychozi ALARM_COOLDOWN_SECS) s poctem pohybu mezi tim
     if (radar_on && alarm_pending > 0 &&
         (!alarm_sent_once || (uint32_t)(millis() - alarm_last) >= (uint32_t)cooldown_secs * 1000UL)) {
-      // "POHYB! c.3 12:05:31 bat=3.95V", souhrn "POHYB! c.4 12:06:40 3x za 60s bat=3.95V" (cas = prvni pohyb)
+      // "POHYB! c.3 12:05:31 bat=3.95V SVETLO ON", souhrn "POHYB! c.4 12:06:40 3x za 60s bat=3.95V SVETLO ON"
+      // (cas = prvni pohyb; SVETLO ON = pri pohybu se rozsvitilo svetlo)
       char body[72], when[12];
       localTimeStr(alarm_first_ts, when);
       alarm_seq++;
       if (alarm_pending > 1) {
-        snprintf(body, sizeof(body), "POHYB! c.%u %s %ux za %us bat=%.2fV", (unsigned)alarm_seq, when,
-                 (unsigned)alarm_pending, (unsigned)cooldown_secs, battVolts());
+        snprintf(body, sizeof(body), "POHYB! c.%u %s %ux za %us bat=%.2fV SVETLO %s", (unsigned)alarm_seq, when,
+                 (unsigned)alarm_pending, (unsigned)cooldown_secs, battVolts(), light_on ? "ON" : "OFF");
       } else {
-        snprintf(body, sizeof(body), "POHYB! c.%u %s bat=%.2fV", (unsigned)alarm_seq, when, battVolts());
+        snprintf(body, sizeof(body), "POHYB! c.%u %s bat=%.2fV SVETLO %s", (unsigned)alarm_seq, when, battVolts(), light_on ? "ON" : "OFF");
       }
       sendChannelText(body, 0);   // bez kanalu se zprava zahodi (nehromadit stare poplachy)
       alarm_sent_once = true;
@@ -543,9 +547,10 @@ protected:
       strcpy(reply, "SVETLO OFF");
       return true;
     }
-    if (strcmp(cmd, "svetlo radar") == 0) {
+    if (strcmp(cmd, "ron") == 0) {   // obdoba LON: "ON 3s c.2 bat=3.95V" (c. = poradove cislo rozsviceni od zapnuti)
       lightPulse();
-      sprintf(reply, "SVETLO RADAR %ds", LIGHT_PULSE_SECS);
+      ron_seq++;
+      sprintf(reply, "ON %ds c.%u bat=%.2fV", LIGHT_PULSE_SECS, (unsigned)ron_seq, battVolts());
       return true;
     }
     if (strcmp(cmd, "status") == 0 || strcmp(cmd, "status radar") == 0) {
@@ -553,8 +558,8 @@ protected:
       if (motion_count == 0) strcpy(last, "-");
       else {
         uint32_t m = (uint32_t)(millis() - motion_last) / 60000UL;
-        if (m < 60) sprintf(last, "%um", (unsigned)m);
-        else sprintf(last, "%uh%02um", (unsigned)(m / 60), (unsigned)(m % 60));
+        if (m < 60) sprintf(last, "%u min", (unsigned)m);
+        else sprintf(last, "%u h %02u min", (unsigned)(m / 60), (unsigned)(m % 60));
       }
       uint32_t up_min = (uint32_t)(uptime_ms / 60000ULL);
       // ot2 = okamzity stav vystupu radaru / pocet jeho nabeznych hran od startu (i pri RADAR OFF)
@@ -683,6 +688,7 @@ protected:
     char cmd[64];
     uint32_t ts, sender;
     if (!chanCommand(type, data, len, cmd, sizeof(cmd), ts, sender)) return;
+    if (strstr(chan_sender, "radar") != NULL) return;   // odpovedi ostatnich radaru nejsou prikazy (jinak by si odpovidaly dokola)
 
     // "radar on 2" -> prikaz "radar on", cile "2";  "status radar" -> prikaz "status", cil "radar"
     char* save = NULL;
@@ -706,9 +712,11 @@ protected:
     } else if (strcmp(word, "radar") == 0 || strcmp(word, "svetlo") == 0) {
       char* sub = (strcmp(word, "radar") == 0) ? t : strtok_r(NULL, " ,", &save);
       if (sub == NULL) return;
-      if (strcmp(sub, "on") && strcmp(sub, "off") && strcmp(sub, "radar")) return;
-      if (strcmp(word, "radar") == 0 && strcmp(sub, "radar") == 0) return;
+      if (strcmp(sub, "on") && strcmp(sub, "off")) return;
       snprintf(action, sizeof(action), "%s %s", word, sub);
+      t = strtok_r(NULL, " ,", &save);
+    } else if (strcmp(word, "ron") == 0) {
+      strcpy(action, "ron");
       t = strtok_r(NULL, " ,", &save);
     } else if (strcmp(word, "status") == 0) {
       strcpy(action, "status");

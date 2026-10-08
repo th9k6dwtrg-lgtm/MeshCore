@@ -143,7 +143,7 @@ protected:
     return true;
   }
 
-  // cislo uzlu = cislice na konci jmena (napr. "zahrada-svetlo-2" nebo "dum-radar-2" -> 2), 0 = bez cisla
+  // cislo uzlu = cislice na konci jmena (napr. "LIGHT 2" nebo "RADAR 2" -> 2), 0 = bez cisla
   int nodeNumber() {
     const char* name = getNodePrefs()->node_name;
     int len = strlen(name), i = len;
@@ -327,6 +327,8 @@ protected:
     return 0;
   }
 
+  char chan_sender[32] = "";   // jmeno odesilatele posledni zpravy z kanalu, malymi pismeny (z chanCommand)
+
   // Rozbali textovou zpravu z kanalu "<odesilatel>: <text>": do cmd da text malymi pismeny bez mezer na konci,
   // vrati casove razitko a hash odesilatele (pro chanReplayOk). Hodiny uzlu srovna podle kazde overene zpravy
   // v kanalu (jen dopredu), at maji upozorneni spravne datum co nejdriv po restartu.
@@ -343,6 +345,9 @@ protected:
     text[tl] = 0;
     const char* sep = strstr(text, ": ");
     size_t sender_len = sep ? (size_t)(sep - text) : 0;
+    size_t sl = sender_len < sizeof(chan_sender) - 1 ? sender_len : sizeof(chan_sender) - 1;
+    for (size_t i = 0; i < sl; i++) chan_sender[i] = tolower((unsigned char)text[i]);
+    chan_sender[sl] = 0;
     sender_hash = nameHash(text, sender_len);
     const char* body = sep ? sep + 2 : text;
     int n = 0;

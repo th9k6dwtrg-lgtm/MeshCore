@@ -183,7 +183,7 @@ int main() {
   // --- hlidani zapnute, svetlo vypnute ---
   cli(m, 0, "svetlo off"); cli(m, 0, "radar on");
   g_millis = 10000; pulse(m);
-  CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: POHYB! c.1 09:00:00 bat=3.90V", "prvni pohyb -> zprava hned s cislem a mistnim casem");
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: POHYB! c.1 09:00:00 bat=3.90V SVETLO OFF", "prvni pohyb -> zprava hned s cislem a mistnim casem");
   CHECK(g_sent[0].delay < 1000, "poplach bez zbytecneho zpozdeni");
   CHECK(board.light_state == 0, "SVETLO OFF: nesviti");
   m.radarLoop(true); m.radarLoop(true);   // 2. pohyb (OUT znovu HIGH)
@@ -197,16 +197,17 @@ int main() {
   g_millis = 69999; m.radarLoop(false);
   CHECK(g_sent.size() == 1, "v 59,999 s porad nic");
   g_millis = 70000; m.radarLoop(false);
-  CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: POHYB! c.2 09:00:00 3x za 60s bat=3.90V", "po 60 s souhrn pohybu");
+  CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: POHYB! c.2 09:00:00 3x za 60s bat=3.90V SVETLO OFF", "po 60 s souhrn pohybu");
   g_millis = 200000; m.radarLoop(false);
   CHECK(g_sent.size() == 2, "bez noveho pohybu uz nic");
   g_millis = 200001; pulse(m);
-  CHECK(g_sent.size() == 3 && g_sent[2].text == "dum-radar: POHYB! c.3 09:00:00 bat=3.90V", "pohyb po klidu -> hned zprava");
+  CHECK(g_sent.size() == 3 && g_sent[2].text == "dum-radar: POHYB! c.3 09:00:00 bat=3.90V SVETLO OFF", "pohyb po klidu -> hned zprava");
 
   // --- svetlo pri pohybu na 3 s ---
   cli(m, 0, "svetlo on");
   g_millis = 300000; m.radarLoop(true); lightTimerLoop();
   CHECK(board.light_state == 1, "SVETLO ON: pohyb rozsviti");
+  CHECK(g_sent.back().text == "dum-radar: POHYB! c.4 09:00:00 bat=3.90V SVETLO ON", "POHYB! uvadi SVETLO ON, kdyz se rozsvitilo");
   g_millis = 302999; lightTimerLoop(); CHECK(board.light_state == 1, "sviti v 2,999 s");
   g_millis = 303000; lightTimerLoop(); CHECK(board.light_state == 0, "zhasne ve 3 s");
   m.radarLoop(false);
@@ -214,7 +215,7 @@ int main() {
   g_millis = 312000; m.radarLoop(true); lightTimerLoop(); m.radarLoop(false);   // dalsi pohyb obnovi odpocet
   g_millis = 314500; lightTimerLoop(); CHECK(board.light_state == 1, "dalsi pohyb prodlouzi svit");
   g_millis = 315000; lightTimerLoop(); CHECK(board.light_state == 0, "pak zhasne");
-  CHECK(cli(m, 0, "svetlo radar") == "SVETLO RADAR 3s" && board.light_state == 1, "SVETLO RADAR");
+  CHECK(cli(m, 0, "ron") == "ON 3s c.1 bat=3.90V" && board.light_state == 1, "RON (obdoba LON)");
   cli(m, 0, "svetlo off");
   CHECK(board.light_state == 0, "SVETLO OFF hned zhasne");
 
@@ -226,7 +227,7 @@ int main() {
   g_millis = 500000; m.radarLoop(false);
   CHECK(g_sent.size() == 1, "po RADAR OFF se cekajici souhrn neposle");
   std::string st2 = cli(m, 0, "status");
-  CHECK(st2.find("pohyb=10 (1m)") != std::string::npos, "STATUS: pocet a cas posledniho pohybu");
+  CHECK(st2.find("pohyb=10 (1 min)") != std::string::npos, "STATUS: pocet a cas posledniho pohybu");
   cli(m, 0, "radar on");
   CHECK(cli(m, 0, "status").find("pohyb=0 (-)") != std::string::npos, "RADAR ON nuluje pocitadlo");
 
@@ -251,17 +252,19 @@ int main() {
   CHECK(g_sent.size() == 5, "STATUS all");
   chanMsg(m, T + 6, "Jirka: SVETLO ON");
   CHECK(g_sent.size() == 6 && g_sent[5].text == "dum-radar: SVETLO ON", "kanal SVETLO ON");
-  chanMsg(m, T + 7, "Jirka: svetlo radar");
-  CHECK(board.light_state == 1, "kanal SVETLO RADAR");
+  chanMsg(m, T + 7, "Jirka: RON");
+  CHECK(board.light_state == 1 && g_sent.back().text == "dum-radar: ON 3s c.2 bat=3.90V", "kanal RON");
   board.setGpio(0);
   size_t before = g_sent.size();
   chanMsg(m, T + 8, "Jirka: LON");                  CHECK(g_sent.size() == before, "LON svetel radar ignoruje");
   chanMsg(m, T + 9, "Jirka: radar");                CHECK(g_sent.size() == before, "neuplny prikaz ignorovan");
   chanMsg(m, T + 10, "Jirka: radar test");          CHECK(g_sent.size() == before, "RADAR TEST neexistuje");
   chanMsg(m, T + 10, "Jirka: svetlo test");         CHECK(g_sent.size() == before && board.light_state == 0, "stary SVETLO TEST uz neexistuje");
-  chanMsg(m, T + 11, "dum-radar: RADAR ON");        CHECK(g_sent.size() == before + 1, "(vlastni ozvena se do kanalu nevraci, ale kdyby ano, zpracuje se jako prikaz)");
-  chanMsg(m, T + 12, "svetlo-1: OFF bat=3.80V rssi=-60 snr=9.5 up=0d01h00m"); CHECK(g_sent.size() == before + 1, "odpoved svetla ignorovana");
-  chanMsg(m, T + 13, "Jirka: ahoj");                CHECK(g_sent.size() == before + 1, "bezna zprava ignorovana");
+  chanMsg(m, T + 11, "dum-radar-2: RADAR ON");      CHECK(g_sent.size() == before, "odpoved jineho radaru neni prikaz (jinak by si radary odpovidaly dokola)");
+  chanMsg(m, T + 11, "RADAR 2: SVETLO ON");         CHECK(g_sent.size() == before, "odpoved radaru RADAR 2 neni prikaz");
+  chanMsg(m, T + 12, "LIGHT 1: OFF bat=3.80V rssi=-60 snr=9.5 up=0d01h00m"); CHECK(g_sent.size() == before, "odpoved svetla ignorovana");
+  chanMsg(m, T + 13, "Jirka: ahoj");                CHECK(g_sent.size() == before, "bezna zprava ignorovana");
+  chanMsg(m, T + 13, "Jirka: svetlo radar");        CHECK(g_sent.size() == before && board.light_state == 0, "stary SVETLO RADAR uz neexistuje");
   // cislovane radary
   strcpy(m.prefs.node_name, "dum-radar-2");
   chanMsg(m, T + 14, "Jirka: RADAR OFF 1");         CHECK(m.radar_on, "RADAR OFF 1 neni pro radar 2");
@@ -276,8 +279,12 @@ int main() {
   strcpy(m.prefs.node_name, "dum-radar-9");
   chanMsg(m, T + 20, "Jirka: STATUS RADAR");        CHECK(g_sent.back().delay == 600, "radar 9 ve stejnem okne jako 1 (8 oken)");
   strcpy(m.prefs.node_name, "dum-radar-2"); board.setGpio(0);
-  chanMsg(m, T + 21, "Jirka: SVETLO RADAR 1");      CHECK(board.light_state == 0, "SVETLO RADAR 1 neni pro radar 2");
-  chanMsg(m, T + 22, "Jirka: SVETLO RADAR 1 2");    CHECK(board.light_state == 1 && g_sent.back().text == "dum-radar-2: SVETLO RADAR 3s", "SVETLO RADAR 1 2 rozsviti radar 2");
+  chanMsg(m, T + 21, "Jirka: RON 1");               CHECK(board.light_state == 0, "RON 1 neni pro radar 2");
+  chanMsg(m, T + 22, "Jirka: RON 1 2");             CHECK(board.light_state == 1 && g_sent.back().text == "dum-radar-2: ON 3s c.3 bat=3.90V", "RON 1 2 rozsviti radar 2");
+  strcpy(m.prefs.node_name, "RADAR 3"); board.setGpio(0);
+  chanMsg(m, T + 23, "Jirka: RON 3");               CHECK(board.light_state == 1 && g_sent.back().text == "RADAR 3: ON 3s c.4 bat=3.90V", "jmeno RADAR 3 -> radar cislo 3");
+  CHECK(g_sent.back().delay == 600 + 2 * 1500, "RADAR 3 odpovida ve 3. okne");
+  strcpy(m.prefs.node_name, "dum-radar-2");
   board.setGpio(0);
   cli(m, 0, "radar on"); g_sent.clear(); g_millis += 100000; pulse(m);
   CHECK(g_sent.size() == 1 && g_sent[0].delay == 0, "poplach POHYB! bez rozestupu");
@@ -524,14 +531,14 @@ int main() {
     CHECK(g_sent.back().text == "dum-radar-1: radar pripraven (RADAR ON, SVETLO OFF)" && g_sent.back().delay == 0, "konec warm-upu, radar 1 bez zpozdeni");
     g_sent.clear();
     g_millis += 1000; pulse(c);
-    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! c.1 12:52:31 bat=4.00V", "pohyb po warm-upu, napeti s korekci");
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! c.1 12:52:31 bat=4.00V SVETLO OFF", "pohyb po warm-upu, napeti s korekci");
     g_millis += 60000; pulse(c);
     g_millis += 59999; c.radarLoop(false);
     CHECK(g_sent.size() == 1, "pauza 120 s: po 60 s jeste nic");
     g_millis += 1; c.radarLoop(false);
-    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! c.2 12:52:31 bat=4.00V", "po 120 s dalsi zprava");
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! c.2 12:52:31 bat=4.00V SVETLO OFF", "po 120 s dalsi zprava");
     g_millis += 120000; pulse(c); g_millis += 10000; pulse(c); g_millis += 10000; pulse(c); g_millis += 100000; c.radarLoop(false);
-    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! c.4 12:52:31 2x za 120s bat=4.00V", "souhrn uvadi nastavenou pauzu");
+    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! c.4 12:52:31 2x za 120s bat=4.00V SVETLO OFF", "souhrn uvadi nastavenou pauzu");
 
     // baterie s korekci: 3,41 V z ADC x 1,026 = 3,50 V -> uz neni slaba
     g_sent.clear();

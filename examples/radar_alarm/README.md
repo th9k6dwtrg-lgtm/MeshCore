@@ -29,23 +29,24 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 
 | Příkaz | Co udělá | Odpověď |
 |---|---|---|
-| `RADAR ON` / `RADAR OFF` | zapne / vypne hlídání | `dum-radar: RADAR ON` |
-| `SVETLO ON` / `SVETLO OFF` | zapne / vypne rozsvícení na 3 s při pohybu | `dum-radar: SVETLO ON` |
-| `SVETLO RADAR` | hned rozsvítí na 3 s (obdoba `LON`), i při `SVETLO OFF` | `dum-radar: SVETLO RADAR 3s` |
-| `STATUS RADAR` | stav radaru | `dum-radar: RADAR ON SVETLO OFF ot2=0/7 pohyb=3 (5m) bat=3.95V rssi=-60 snr=9.5 up=0d02h15m` |
-| `RADAR KALIBRACE` | za 60 s spustí automatické prahy radaru, sken 15 min (`RADAR KALIBRACE 20m` = 20 min, 2–60) | `dum-radar: KALIBRACE za 60s, sken 15 min - odejdi z dosahu` |
-| `RADAR PRAHY` | prahy sepnutí bran 0–15 s hodnocením proti výchozím (viz níže) | `dum-radar: sepnuti citlivejsi: 44-4 42 36 …` |
-| `RADAR PRAHY H` | totéž pro prahy udržení | `dum-radar: udrzeni jako vychozi: 45 42 …` |
-| `RADAR PRAHY VYCHOZI` | zapíše do radaru výchozí prahy sepnutí i udržení a ověří je (také `výchozí` nebo `reset`) | `dum-radar: VYCHOZI zapsany, sepnuti jako vychozi: 48 42 …` |
+| `RADAR ON` / `RADAR OFF` | zapne / vypne hlídání | `RADAR 1: RADAR ON` |
+| `SVETLO ON` / `SVETLO OFF` | zapne / vypne rozsvícení na 3 s při pohybu | `RADAR 1: SVETLO ON` |
+| `RON` | hned rozsvítí na 3 s (obdoba `LON`), i při `SVETLO OFF`; `c.` = pořadové číslo rozsvícení od zapnutí | `RADAR 1: ON 3s c.2 bat=3.95V` |
+| `STATUS RADAR` | stav radaru | `RADAR 1: RADAR ON SVETLO OFF ot2=0/7 pohyb=3 (5 min) bat=3.95V rssi=-60 snr=9.5 up=0d02h15m` |
+| `RADAR KALIBRACE` | za 60 s spustí automatické prahy radaru, sken 15 min (`RADAR KALIBRACE 20m` = 20 min, 2–60) | `RADAR 1: KALIBRACE za 60s, sken 15 min - odejdi z dosahu` |
+| `RADAR PRAHY` | prahy sepnutí bran 0–15 s hodnocením proti výchozím (viz níže) | `RADAR 1: sepnuti citlivejsi: 44-4 42 36 …` |
+| `RADAR PRAHY H` | totéž pro prahy udržení | `RADAR 1: udrzeni jako vychozi: 45 42 …` |
+| `RADAR PRAHY VYCHOZI` | zapíše do radaru výchozí prahy sepnutí i udržení a ověří je (také `výchozí` nebo `reset`) | `RADAR 1: VYCHOZI zapsany, sepnuti jako vychozi: 48 42 …` |
 | `STATUS` | odpoví všechny uzly v kanálu, radar až po světlech 1–4 (6,6 s) | jako výše |
 
 - `ot2` = okamžitý stav výstupu radaru (1 = přítomnost) / počet jeho sepnutí od startu (počítá i při RADAR OFF, slouží k testu radaru). `pohyb` = počet pohybů od `RADAR ON`, v závorce kdy byl poslední. `rssi/snr` = poslední přijatý paket (tj. tento příkaz, od nejbližšího souseda).
-- Více radarů: číslo na konci jména (`dum-radar-2`), pak `RADAR OFF 2`, `SVETLO RADAR 2`, `STATUS 2`. Číslo jde přidat ke každému příkazu radaru (i víc čísel, `SVETLO RADAR 1 3`). Bez čísla platí pro všechny radary.
+- Více radarů: číslo na konci jména (`RADAR 2`, světla `LIGHT 2`), pak `RADAR OFF 2`, `RON 2`, `STATUS 2`. Číslo jde přidat ke každému příkazu radaru (i víc čísel, `RON 1 3`). Bez čísla platí pro všechny radary.
+- Zprávy od uzlů, jejichž jméno obsahuje „radar“ (`RADAR 2`, `dum-radar-2`), radar ignoruje. Jejich odpovědi jako `RADAR ON` by jinak ostatní radary braly jako příkaz a odpovídaly by si navzájem dokola. Člověk v kanálu proto nesmí mít „radar“ ve jménu.
 - **Rozestupy odpovědí** jako u světel: radar 1 odpovídá za 0,6 s, radar 2 o 1,5 s později, …, radar bez čísla jako 5. (8 oken, radar 9 = okno radaru 1). Na `STATUS` pro všechny se celé pořadí posune až za světla (+6,6 s). Stejně se rozkládají i zprávy „radar pripraven“, baterie a výsledky kalibrace. `POHYB!` jde vždy hned.
 - Zahradní světla na `STATUS RADAR`, `RADAR …` ani `SVETLO …` nereagují; radar nereaguje na `LON/LOFF`.
 - Po každém zapnutí nebo restartu začíná radar s `RADAR ON` a `SVETLO OFF` (`RADAR_BOOT_ON`, `SVETLO_BOOT_ON`), změna příkazem platí jen do vypnutí. Klíč kanálu je v `/radar_ch`.
 
-**Poplach:** při zapnutém hlídání a novém pohybu (náběžná hrana OT2) pošle hned `dum-radar: POHYB! c.1 12:05:31 bat=3.95V` (pořadové číslo zprávy o pohybu od zapnutí uzlu, místní čas zachycení, napětí). Další zpráva nejdřív za 60 s (výchozí `ALARM_COOLDOWN_SECS`, mění se příkazem `PAUZA`), se souhrnem `POHYB! c.2 12:05:40 3x za 60s bat=3.95V`, kde čas je první pohyb ze souhrnu. Pořadové číslo je jen v RAM, po vypnutí a zapnutí začíná od 1. Čas je středoevropský včetně letního, dokud hodiny uzlu nesrovná první zpráva v kanálu, je místo něj `cas?`. Je-li zapnuté světlo, rozsvítí se na 3 s (`LIGHT_PULSE_SECS`) při každém pohybu. Prvních 30 s po startu (výchozí `RADAR_STARTUP_SECS`, mění se příkazem `WARMUP`) se pohyb nevyhodnocuje (radar se ustaluje) a přítomnost, která trvá už při startu, se za pohyb nepovažuje. Na konci ustalování pošle do kanálu `radar pripraven (RADAR ON, SVETLO OFF)`, a je-li ustalování delší než 60 s, ještě 60 s předem `radar pripraven za 60 s (RADAR ON)`. Hodiny uzlu jsou po restartu nastavené až první zprávou v kanálu, takže tyto zprávy mohou mít v aplikaci staré datum. Zpráva jde jednou, floodem a bez potvrzení (stejně jako upozornění světel), takže přes slabé spojení nemusí dorazit; pro alarm se vyplatí vlastní repeater.
+**Poplach:** při zapnutém hlídání a novém pohybu (náběžná hrana OT2) pošle hned `RADAR 1: POHYB! c.1 12:05:31 bat=3.95V SVETLO ON` (pořadové číslo zprávy o pohybu od zapnutí uzlu, místní čas zachycení, napětí a jestli se při pohybu rozsvítilo světlo). Další zpráva nejdřív za 60 s (výchozí `ALARM_COOLDOWN_SECS`, mění se příkazem `PAUZA`), se souhrnem `POHYB! c.2 12:05:40 3x za 60s bat=3.95V SVETLO ON`, kde čas je první pohyb ze souhrnu. Pořadové číslo je jen v RAM, po vypnutí a zapnutí začíná od 1. Čas je středoevropský včetně letního, dokud hodiny uzlu nesrovná první zpráva v kanálu, je místo něj `cas?`. Je-li zapnuté světlo, rozsvítí se na 3 s (`LIGHT_PULSE_SECS`) při každém pohybu. Prvních 30 s po startu (výchozí `RADAR_STARTUP_SECS`, mění se příkazem `WARMUP`) se pohyb nevyhodnocuje (radar se ustaluje) a přítomnost, která trvá už při startu, se za pohyb nepovažuje. Na konci ustalování pošle do kanálu `radar pripraven (RADAR ON, SVETLO OFF)`, a je-li ustalování delší než 60 s, ještě 60 s předem `radar pripraven za 60 s (RADAR ON)`. Hodiny uzlu jsou po restartu nastavené až první zprávou v kanálu, takže tyto zprávy mohou mít v aplikaci staré datum. Zpráva jde jednou, floodem a bez potvrzení (stejně jako upozornění světel), takže přes slabé spojení nemusí dorazit; pro alarm se vyplatí vlastní repeater.
 
 **Baterie:** stejně jako světla, slabá < 3,50 V, kritická < 3,35 V, jedna zpráva do kanálu.
 
@@ -67,7 +68,7 @@ Korekce `BATKAL` platí pro napětí ve zprávách, `STATUS` i hlídání slabé
 Kanál (`CHAN`, ochrana proti přehrání, odesílání zpráv), hlídání baterie s `BATKAL`, rozestupy podle čísla uzlu, watchdog a doba běhu jsou v `examples/zahrada_common/ZahradaNode.h`, ze kterého vychází světlo (`examples/zahrada_light`) i radar. Pořád jsou to dva samostatné firmwary: světlo umí jen `LON`/`LOFF`/`STATUS` a spíná D6. Po změně společného souboru je potřeba projít testy obou (`./zahrada_test/run.sh` a `./radar_test/run.sh`, v Actions běží automaticky).
 
 ## Nastavení nového uzlu (USB konzole)
-Stejně jako světlo: `ver`, `get radio`, `set name dum-radar`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `SVETLO RADAR`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.
+Stejně jako světlo: `ver`, `get radio`, `set name RADAR 1`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `RON`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.
 
 Heslo ani klíč kanálu nepatří do kódu (repozitář je veřejný).
 
