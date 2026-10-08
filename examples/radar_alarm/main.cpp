@@ -99,6 +99,40 @@ static void uptimeLoop() {
 #ifndef RADAR_UART
   #define RADAR_UART  Serial1
 #endif
+
+// Vychozi prahy = hodnoty prectene z noveho modulu LD2410S (8. 10. 2026, far=12); protokol tovarni hodnoty neuvadi.
+// Prah je energie, kterou musi pohyb v dane brane prekrocit: vyssi cislo = mene citlive.
+static const uint8_t LD_DEF_TRIGGER[LD_GATES] = {48, 42, 36, 34, 32, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31};
+static const uint8_t LD_DEF_HOLD[LD_GATES]    = {45, 42, 33, 32, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28};
+#define LD_SAME_DIFF   3   // odchylka do +-3 od vychozi hodnoty = "skoro jako vychozi"
+#define LD_WARN_DIFF  10   // od +-10 "POZOR" (odhad z praxe, ne udaj vyrobce)
+
+// radek prahu pro cloveka, napr. "sepnuti citlivejsi: 44-4 42 36 ...": u zmenenych bran rozdil proti vychozi
+// hodnote (minus = citlivejsi, plus = mene citlive). Hodnoceni jen pro brany 0..far_gate, ktere radar pouziva.
+static void thresholdLine(char* dest, size_t max, const char* label, const uint8_t* v, const uint8_t* def, int far_gate) {
+  int dmin = 0, dmax = 0;
+  bool changed = false;
+  for (int g = 0; g <= far_gate && g < LD_GATES; g++) {
+    int d = (int)v[g] - def[g];
+    if (d < dmin) dmin = d;
+    if (d > dmax) dmax = d;
+    if (d != 0) changed = true;
+  }
+  const char* verdict;
+  if (dmin <= -LD_WARN_DIFF) verdict = "POZOR prilis citlive";
+  else if (dmax >= LD_WARN_DIFF) verdict = "POZOR malo citlive";
+  else if (dmin < -LD_SAME_DIFF && dmax > LD_SAME_DIFF) verdict = "citlivejsi i mene citlive";
+  else if (dmin < -LD_SAME_DIFF) verdict = "citlivejsi";
+  else if (dmax > LD_SAME_DIFF) verdict = "mene citlive";
+  else verdict = changed ? "skoro jako vychozi" : "jako vychozi";
+  int p = snprintf(dest, max, "%s %s:", label, verdict);
+  for (int g = 0; g < LD_GATES && p > 0 && p < (int)max; g++) {
+    int d = (int)v[g] - def[g];
+    if (d != 0) p += snprintf(dest + p, max - p, " %u%+d", v[g], d);
+    else p += snprintf(dest + p, max - p, " %u", v[g]);
+  }
+}
+
 class LD2410S {
   uint8_t buf[96];
   int n = 0;
@@ -196,18 +230,38 @@ public:
     return ok;
   }
 
-  // precte oba radky prahu ("T 48 42 ... H 45 42 ...")
-  bool thresholdsText(char* dest, size_t max) {
-    uint8_t t[LD_GATES], h[LD_GATES];
+  // 0x0072 = trigger (sepnuti), 0x0076 = hold (udrzeni)
+  bool writeThresholds(uint16_t cmd, const uint8_t vals[LD_GATES]) {
+    uint8_t d[6 * LD_GATES];
+    for (int g = 0; g < LD_GATES; g++) {
+      uint8_t* e = &d[6 * g];
+      e[0] = g; e[1] = 0; e[2] = vals[g]; e[3] = 0; e[4] = 0; e[5] = 0;
+    }
+    return command(cmd, d, sizeof(d));
+  }
+
+  // nejvzdalenejsi pouzita brana (obecny parametr 0x05), brany za ni radar nevyhodnocuje
+  int readFarGate() {
+    static const uint8_t d[2] = {0x05, 0x00};
+    uint8_t out[4];
+    if (!command(0x0071, d, 2, out, 4)) return LD_GATES - 1;
+    return (out[0] >= 1 && out[0] < LD_GATES) ? out[0] : LD_GATES - 1;
+  }
+
+  // precte prahy sepnuti i udrzeni a nejvzdalenejsi branu
+  bool readAll(uint8_t t[LD_GATES], uint8_t h[LD_GATES], int& far_gate) {
     if (!configOn()) return false;
+    far_gate = readFarGate();
     bool ok = readThresholds(0x0073, t) && readThresholds(0x0077, h);
     configOff();
-    if (!ok) return false;
-    int p = snprintf(dest, max, "T");
-    for (int g = 0; g < LD_GATES && p < (int)max; g++) p += snprintf(dest + p, max - p, " %u", t[g]);
-    if (p < (int)max) p += snprintf(dest + p, max - p, " H");
-    for (int g = 0; g < LD_GATES && p < (int)max; g++) p += snprintf(dest + p, max - p, " %u", h[g]);
-    return true;
+    return ok;
+  }
+
+  bool writeDefaults() {
+    if (!configOn()) return false;
+    bool ok = writeThresholds(0x0072, LD_DEF_TRIGGER) && writeThresholds(0x0076, LD_DEF_HOLD);
+    configOff();
+    return ok;
   }
 
   // zpracuje prichozi datove ramce (behem kalibrace)
@@ -270,6 +324,11 @@ protected:
   uint32_t alarm_last = 0;        // millis() posledni zpravy o pohybu
   uint32_t alarm_pending = 0;     // pohyby od posledni odeslane zpravy
 
+  // nastaveni pres CLI (uklada se do /radar_cfg): ustalovani po startu, pauza mezi zpravami o pohybu, korekce ADC
+  uint16_t startup_secs = RADAR_STARTUP_SECS;
+  uint16_t cooldown_secs = ALARM_COOLDOWN_SECS;
+  uint16_t batkal = 1000;         // napeti baterie x batkal/1000 (BATKAL podle multimetru)
+
   // kalibrace (automaticke prahy radaru pres UART)
   enum { KAL_IDLE, KAL_WAIT, KAL_SCAN };
   uint8_t kal_state = KAL_IDLE;
@@ -319,7 +378,7 @@ protected:
     if (now && !active) {
       char body[48];
       snprintf(body, sizeof(body), "baterie %s %.2f V", what, mv / 1000.0f);
-      active = sendChannelText(body, 0);
+      active = sendChannelText(body, slotDelay());
     } else {
       active = now;
     }
@@ -329,9 +388,7 @@ protected:
 #ifdef NRF52_POWER_MANAGEMENT
     if (board.isExternalPowered()) { low_cnt = crit_cnt = 0; return; }   // na USB napeti baterie nevypovida
 #endif
-    uint32_t mv = 0;
-    for (int i = 0; i < 4; i++) mv += board.getBattMilliVolts();
-    mv /= 4;
+    uint32_t mv = battMilliVolts();
 
     low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
     crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
@@ -352,11 +409,20 @@ protected:
     return (i < len) ? atoi(&name[i]) : 0;
   }
 
-  // napeti baterie ve voltech: prumer 4 mereni (jedno mereni ADC kolisa), stejne jako hlidani baterie
-  float battVolts() {
+  // napeti baterie: prumer 4 mereni (jedno mereni ADC kolisa), s korekci BATKAL
+  uint32_t battRawMilliVolts() {
     uint32_t mv = 0;
     for (int i = 0; i < 4; i++) mv += board.getBattMilliVolts();
-    return (mv / 4) / 1000.0f;
+    return mv / 4;
+  }
+  uint32_t battMilliVolts() { return battRawMilliVolts() * batkal / 1000; }
+  float battVolts() { return battMilliVolts() / 1000.0f; }
+
+  // rozestup zprav podle cisla radaru (stejne jako zahradni svetla): radar 1 hned, 2 o 1,5 s pozdeji ...,
+  // radar bez cisla jako 5., at se odpovedi a hlaseni vice radaru v kanalu nesrazi
+  uint32_t slotDelay() {
+    int me = nodeNumber();
+    return (uint32_t)((me > 0 ? me - 1 : 4) % 8) * 1500UL;
   }
 
   void lightPulse() {
@@ -377,21 +443,22 @@ public:
     motion_prev = motion;
     if (rising) ot2_edges++;
     uint32_t since_start = (uint32_t)(millis() - radar_start);
-    bool settling = since_start < RADAR_STARTUP_MS;
+    uint32_t startup_ms = (uint32_t)startup_secs * 1000UL;
+    bool settling = since_start < startup_ms;
     bool kal = kal_state != KAL_IDLE;   // behem kalibrace se pohyb (odchod z dosahu) nehlasi
 
     // po startu do kanalu: 60 s pred koncem ustalovani a pri jeho konci (jednou, at je jasne, kdy radar hlida)
-    if (!ready_warn_sent && RADAR_STARTUP_SECS > RADAR_READY_WARN_SECS &&
-        since_start >= RADAR_STARTUP_MS - RADAR_READY_WARN_SECS * 1000UL) {
+    if (!ready_warn_sent && startup_secs > RADAR_READY_WARN_SECS &&
+        since_start >= startup_ms - RADAR_READY_WARN_SECS * 1000UL) {
       char body[48];
       snprintf(body, sizeof(body), "radar pripraven za %d s (RADAR %s)", RADAR_READY_WARN_SECS, radar_on ? "ON" : "OFF");
-      sendChannelText(body, 0);
+      sendChannelText(body, slotDelay());
       ready_warn_sent = true;
     }
     if (!ready_sent && !settling) {
       char body[48];
       snprintf(body, sizeof(body), "radar pripraven (RADAR %s, SVETLO %s)", radar_on ? "ON" : "OFF", light_on ? "ON" : "OFF");
-      sendChannelText(body, 0);
+      sendChannelText(body, slotDelay());
       ready_warn_sent = ready_sent = true;
     }
 
@@ -401,13 +468,13 @@ public:
       alarm_pending++;
       if (light_on) lightPulse();
     }
-    // zprava hned pri prvnim pohybu, dalsi az po ALARM_COOLDOWN_SECS (s poctem pohybu mezi tim)
+    // zprava hned pri prvnim pohybu, dalsi az po pauze (PAUZA, vychozi ALARM_COOLDOWN_SECS) s poctem pohybu mezi tim
     if (radar_on && alarm_pending > 0 &&
-        (!alarm_sent_once || (uint32_t)(millis() - alarm_last) >= ALARM_COOLDOWN_MS)) {
+        (!alarm_sent_once || (uint32_t)(millis() - alarm_last) >= (uint32_t)cooldown_secs * 1000UL)) {
       char body[64];
       if (alarm_pending > 1) {
         snprintf(body, sizeof(body), "POHYB! %ux za %us, bat=%.2fV", (unsigned)alarm_pending,
-                 (unsigned)ALARM_COOLDOWN_SECS, battVolts());
+                 (unsigned)cooldown_secs, battVolts());
       } else {
         snprintf(body, sizeof(body), "POHYB! bat=%.2fV", battVolts());
       }
@@ -428,7 +495,7 @@ public:
       if (!ld.startAuto(kal_minutes * 60)) {
         ld.end();
         kal_state = KAL_IDLE;
-        sendChannelText("kalibrace CHYBA: radar neodpovida", 0);
+        sendChannelText("kalibrace CHYBA: radar neodpovida", slotDelay());
         return;
       }
       kal_state = KAL_SCAN;
@@ -437,13 +504,18 @@ public:
     }
     ld.poll();   // prubeh skenu (jen pro STATUS; jednotku protokol jasne neuvadi, konec se ridi casem)
     if (el < kal_minutes * 60000UL + RADAR_KAL_GRACE_MS) return;
-    char body[120];
-    strcpy(body, "kalibrace hotova ");
-    if (!ld.thresholdsText(&body[strlen(body)], sizeof(body) - strlen(body)))
-      strcpy(body, "kalibrace CHYBA: prahy nejdou precist");
+    uint8_t t[LD_GATES], h[LD_GATES];
+    int far_gate = LD_GATES - 1;
+    bool ok = ld.readAll(t, h, far_gate);
     ld.end();
     kal_state = KAL_IDLE;
-    sendChannelText(body, 0);
+    if (!ok) { sendChannelText("kalibrace CHYBA: prahy nejdou precist", slotDelay()); return; }
+    char body[160];
+    strcpy(body, "kalibrace: ");
+    thresholdLine(&body[strlen(body)], sizeof(body) - strlen(body), "sepnuti", t, LD_DEF_TRIGGER, far_gate);
+    sendChannelText(body, slotDelay());
+    thresholdLine(body, sizeof(body), "udrzeni", h, LD_DEF_HOLD, far_gate);
+    sendChannelText(body, slotDelay() + 1000);
 #endif
   }
 
@@ -472,17 +544,27 @@ protected:
       sprintf(reply, "KALIBRACE za %ds, sken %d min - odejdi z dosahu", RADAR_KAL_DELAY_SECS, mins);
       return true;
     }
-    if (strcmp(cmd, "radar prahy") == 0) {
+    // RADAR PRAHY = sepnuti, RADAR PRAHY H = udrzeni, RADAR PRAHY VYCHOZI = zapsat vychozi prahy
+    if (strncmp(cmd, "radar prahy", 11) == 0) {
+      const char* arg = cmd[11] == ' ' ? &cmd[12] : &cmd[11];
+      bool hold = strcmp(arg, "h") == 0;
+      bool defaults = strcmp(arg, "vychozi") == 0 || strcmp(arg, "výchozí") == 0 || strcmp(arg, "reset") == 0;
+      if (*arg && !hold && !defaults) return false;
       if (kal_state != KAL_IDLE) { strcpy(reply, "KALIBRACE bezi, prahy az po ni"); return true; }
       ld.begin();
-      char t[110];
-      if (ld.thresholdsText(t, sizeof(t))) sprintf(reply, "prahy %s", t);
-      else strcpy(reply, "Err - radar neodpovida (UART)");
+      bool wrote = !defaults || ld.writeDefaults();
+      uint8_t t[LD_GATES], h[LD_GATES];
+      int far_gate = LD_GATES - 1;
+      bool ok = wrote && ld.readAll(t, h, far_gate);
       ld.end();
+      if (!ok) { strcpy(reply, "Err - radar neodpovida (UART)"); return true; }
+      int p = defaults ? sprintf(reply, "VYCHOZI zapsany, ") : 0;
+      thresholdLine(&reply[p], 150 - p, hold ? "udrzeni" : "sepnuti", hold ? h : t,
+                    hold ? LD_DEF_HOLD : LD_DEF_TRIGGER, far_gate);
       return true;
     }
 #else
-    if (strncmp(cmd, "radar kalibrace", 15) == 0 || strcmp(cmd, "radar prahy") == 0) {
+    if (strncmp(cmd, "radar kalibrace", 15) == 0 || strncmp(cmd, "radar prahy", 11) == 0) {
       strcpy(reply, "Err - build bez UART radaru");
       return true;
     }
@@ -557,6 +639,12 @@ protected:
 
   // ---------- ulozeni stavu a klice kanalu v pameti uzlu ----------
   #define RADAR_CFG_FILE   "/radar_cfg"
+  #define WARMUP_MIN   10
+  #define WARMUP_MAX   900
+  #define PAUZA_MIN    10
+  #define PAUZA_MAX    3600
+  #define BATKAL_MIN   800    // korekce ADC 0,800 az 1,250
+  #define BATKAL_MAX   1250
   #define RADAR_CHAN_FILE  "/radar_ch"
 
   void applyChannelSecret(const uint8_t* secret32) {
@@ -580,8 +668,15 @@ public:
     }
     File c = InternalFS.open(RADAR_CFG_FILE, FILE_O_READ);
     if (c) {
-      uint8_t b[2];
-      if (c.read(b, 2) == 2) { radar_on = b[0] != 0; light_on = b[1] != 0; }
+      uint8_t b[8];
+      int n = c.read(b, sizeof(b));
+      if (n >= 2) { radar_on = b[0] != 0; light_on = b[1] != 0; }
+      if (n >= 8) {   // novejsi soubor: nastaveni z CLI
+        uint16_t w = b[2] | (b[3] << 8), pz = b[4] | (b[5] << 8), k = b[6] | (b[7] << 8);
+        if (w >= WARMUP_MIN && w <= WARMUP_MAX) startup_secs = w;
+        if (pz >= PAUZA_MIN && pz <= PAUZA_MAX) cooldown_secs = pz;
+        if (k >= BATKAL_MIN && k <= BATKAL_MAX) batkal = k;
+      }
       c.close();
     }
 #endif
@@ -593,8 +688,11 @@ protected:
     InternalFS.remove(RADAR_CFG_FILE);
     File f = InternalFS.open(RADAR_CFG_FILE, FILE_O_WRITE);
     if (f) {
-      uint8_t b[2] = { (uint8_t)(radar_on ? 1 : 0), (uint8_t)(light_on ? 1 : 0) };
-      f.write(b, 2);
+      uint8_t b[8] = { (uint8_t)(radar_on ? 1 : 0), (uint8_t)(light_on ? 1 : 0),
+                       (uint8_t)(startup_secs & 0xFF), (uint8_t)(startup_secs >> 8),
+                       (uint8_t)(cooldown_secs & 0xFF), (uint8_t)(cooldown_secs >> 8),
+                       (uint8_t)(batkal & 0xFF), (uint8_t)(batkal >> 8) };
+      f.write(b, sizeof(b));
       f.close();
     }
 #endif
@@ -614,6 +712,61 @@ protected:
 #endif
   }
 
+  // ---------- nastaveni jen pres CLI (USB nebo prihlaseny admin), kazdy radar zvlast ----------
+  //   WARMUP [s]       ustalovani radaru po startu (10-900 s), bez cisla = zobrazit
+  //   PAUZA [s]        nejkratsi odstup zprav o pohybu (10-3600 s)
+  //   BATKAL [V|OFF]   korekce mereni baterie: zadat napeti namerene multimetrem, OFF = bez korekce
+  //   NASTAVENI        vse najednou
+  bool execSettings(const char* cmd, char* reply) {
+    if (strcmp(cmd, "nastaveni") == 0) {
+      sprintf(reply, "warmup=%us pauza=%us batkal=%u.%03u bat=%.2fV", startup_secs, cooldown_secs,
+              batkal / 1000, batkal % 1000, battVolts());
+      return true;
+    }
+    if (strcmp(cmd, "warmup") == 0) { sprintf(reply, "warmup=%us", startup_secs); return true; }
+    if (strncmp(cmd, "warmup ", 7) == 0) {
+      int v = atoi(&cmd[7]);
+      if (v < WARMUP_MIN || v > WARMUP_MAX) { sprintf(reply, "Err - warmup %d az %d s", WARMUP_MIN, WARMUP_MAX); return true; }
+      startup_secs = v;
+      saveRadarConfig();
+      sprintf(reply, "OK warmup=%us", startup_secs);
+      return true;
+    }
+    if (strcmp(cmd, "pauza") == 0) { sprintf(reply, "pauza=%us", cooldown_secs); return true; }
+    if (strncmp(cmd, "pauza ", 6) == 0) {
+      int v = atoi(&cmd[6]);
+      if (v < PAUZA_MIN || v > PAUZA_MAX) { sprintf(reply, "Err - pauza %d az %d s", PAUZA_MIN, PAUZA_MAX); return true; }
+      cooldown_secs = v;
+      saveRadarConfig();
+      sprintf(reply, "OK pauza=%us", cooldown_secs);
+      return true;
+    }
+    if (strcmp(cmd, "batkal") == 0 || strcmp(cmd, "batkal off") == 0 || strncmp(cmd, "batkal ", 7) == 0) {
+      if (strcmp(cmd, "batkal off") == 0) {
+        batkal = 1000;
+        saveRadarConfig();
+      } else if (cmd[6] == ' ') {
+        char num[12];                // napeti z multimetru, napr. 4.12 (carka i tecka)
+        strncpy(num, &cmd[7], sizeof(num) - 1);
+        num[sizeof(num) - 1] = 0;
+        char* comma = strchr(num, ',');
+        if (comma) *comma = '.';
+        float v = atof(num);
+        uint32_t raw = battRawMilliVolts();
+        uint32_t k = raw > 0 ? (uint32_t)(v * 1000.0f * 1000.0f / raw + 0.5f) : 0;
+        if (v < 2.5f || v > 4.5f || k < BATKAL_MIN || k > BATKAL_MAX) {
+          sprintf(reply, "Err - BATKAL 2.5 az 4.5 V a nejvys o 20 %% od mereni (%.2fV)", raw / 1000.0f);
+          return true;
+        }
+        batkal = k;
+        saveRadarConfig();
+      }
+      sprintf(reply, "batkal=%u.%03u bat=%.2fV", batkal / 1000, batkal % 1000, battVolts());
+      return true;
+    }
+    return false;
+  }
+
   // ---------- CLI: USB nebo LoRa od prihlaseneho admina ----------
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
     char cmd[80];
@@ -629,6 +782,7 @@ protected:
     if (sender_timestamp > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(sender_timestamp);
 
     if (execRadar(cmd, reply)) return true;
+    if (execSettings(cmd, reply)) return true;
 
     // test poplachu: posle zkusebni zpravu do kanalu (jen pres USB)
     if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
@@ -720,7 +874,10 @@ protected:
       snprintf(action, sizeof(action), "radar %s", t);
       t = strtok_r(NULL, " ,", &save);
       int tl = t ? strlen(t) : 0;
-      if (tl >= 2 && t[tl - 1] == 'm' && isdigit((unsigned char)t[0]) && strcmp(action, "radar kalibrace") == 0) {
+      bool kal_time = tl >= 2 && t[tl - 1] == 'm' && isdigit((unsigned char)t[0]) && strcmp(action, "radar kalibrace") == 0;
+      bool prahy_arg = t && strcmp(action, "radar prahy") == 0 &&
+                       (strcmp(t, "h") == 0 || strcmp(t, "vychozi") == 0 || strcmp(t, "výchozí") == 0 || strcmp(t, "reset") == 0);
+      if (kal_time || prahy_arg) {
         snprintf(&action[strlen(action)], sizeof(action) - strlen(action), " %s", t);
         t = strtok_r(NULL, " ,", &save);
       }
@@ -752,11 +909,12 @@ protected:
     // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
     if (!chanReplayOk(nameHash(text, sender_len), ts)) return;
 
-    char result[120];
+    char result[160];
     if (!execRadar(action, result)) return;
 
     // prikaz pro vsechny uzly -> odpovedet az po zahradnich svetlech, at se zpravy nesrazi
-    sendChannelText(result, for_all && strcmp(action, "status") == 0 ? REPLY_ALL_DELAY_MS : 600);
+    // rozestup podle cisla radaru; prikaz pro vsechny uzly -> az po zahradnich svetlech
+    sendChannelText(result, (for_all && strcmp(action, "status") == 0 ? REPLY_ALL_DELAY_MS : 600) + slotDelay());
   }
 
   // zprava do soukromeho kanalu ve tvaru "<jmeno>: <text>" (stejny format jako zprava z aplikace)

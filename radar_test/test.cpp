@@ -9,6 +9,7 @@ struct UartMock {
   uint8_t trig[16] = {48,42,36,34,32,31,31,31,31,31,31,31,31,31,31,31};
   uint8_t hold[16] = {45,42,33,32,28,28,28,28,28,28,28,28,28,28,28,28};
   bool config = false;
+  uint8_t far = 12;
   int auto_scan = -1;
   std::vector<uint16_t> cmds;
   void setPins(int rx, int tx) { rx_pin = rx; tx_pin = tx; }
@@ -41,6 +42,13 @@ struct UartMock {
     else if (cmd == 0x00FE) { config = false; ack(cmd); }
     else if (!config) { }   // mimo konfiguracni rezim radar neodpovi
     else if (cmd == 0x0009) { auto_scan = d[4] | (d[5] << 8); ack(cmd); }
+    else if (cmd == 0x0071) { ack(cmd, {far, 0, 0, 0}); }   // jen dotaz na 0x05 (nejvzdalenejsi brana)
+    else if (cmd == 0x0072 || cmd == 0x0076) {
+      uint8_t* t = cmd == 0x0072 ? trig : hold;
+      int dl = (f[4] | (f[5] << 8)) - 2;
+      for (int k = 0; k + 6 <= dl; k += 6) t[d[k]] = d[k + 2];
+      ack(cmd);
+    }
     else if (cmd == 0x0073 || cmd == 0x0077) {
       std::vector<uint8_t> v;
       for (int g = 0; g < 16; g++) { v.push_back(cmd == 0x0073 ? trig[g] : hold[g]); v.push_back(0); v.push_back(0); v.push_back(0); }
@@ -193,7 +201,7 @@ int main() {
   g_sent.clear();
   uint32_t T = 1800001000;
   chanMsg(m, T, "Jirka: RADAR OFF");
-  CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: RADAR OFF" && g_sent[0].delay == 600, "kanal RADAR OFF");
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: RADAR OFF" && g_sent[0].delay == 600 + 6000, "kanal RADAR OFF (radar bez cisla az jako 5.)");
   CHECK(m.rtc.t >= T, "hodiny srovnany podle kanalu");
   chanMsg(m, T, "Jirka: RADAR ON");
   CHECK(g_sent.size() == 1, "prehrani (stejne razitko) odmitnuto");
@@ -201,9 +209,9 @@ int main() {
   CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar: RADAR ON", "kanal radar on malymi");
   chanMsg(m, T + 2, "Jirka: STATUS RADAR");
   CHECK(g_sent.size() == 3 && g_sent[2].text.rfind("dum-radar: RADAR ON SVETLO OFF", 0) == 0, "kanal STATUS RADAR");
-  CHECK(g_sent[2].delay == 600, "STATUS RADAR odpovida hned");
+  CHECK(g_sent[2].delay == 600 + 6000, "STATUS RADAR: radar bez cisla v 5. okne");
   chanMsg(m, T + 3, "Jirka: STATUS");
-  CHECK(g_sent.size() == 4 && g_sent[3].delay == REPLY_ALL_DELAY_MS, "STATUS pro vsechny: odpoved az po svetlech");
+  CHECK(g_sent.size() == 4 && g_sent[3].delay == REPLY_ALL_DELAY_MS + 6000, "STATUS pro vsechny: odpoved az po svetlech");
   chanMsg(m, T + 4, "Jirka: STATUS 2");
   CHECK(g_sent.size() == 4, "STATUS 2 (svetlo 2) neni pro radar bez cisla");
   chanMsg(m, T + 5, "Jirka: STATUS all");
@@ -225,6 +233,17 @@ int main() {
   chanMsg(m, T + 14, "Jirka: RADAR OFF 1");         CHECK(m.radar_on, "RADAR OFF 1 neni pro radar 2");
   chanMsg(m, T + 15, "Jirka: RADAR OFF 2");         CHECK(!m.radar_on, "RADAR OFF 2 je pro radar 2");
   chanMsg(m, T + 16, "Jirka: STATUS 2");            CHECK(g_sent.back().text.rfind("dum-radar-2: RADAR OFF", 0) == 0, "STATUS 2 pro radar 2");
+  // rozestupy odpovedi podle cisla radaru (jako zahradni svetla)
+  CHECK(g_sent.back().delay == 600 + 1500, "radar 2 odpovida o 1,5 s po radaru 1");
+  chanMsg(m, T + 17, "Jirka: STATUS");              CHECK(g_sent.back().delay == REPLY_ALL_DELAY_MS + 1500, "STATUS pro vsechny: radar 2 po svetlech a po radaru 1");
+  strcpy(m.prefs.node_name, "dum-radar-1");
+  chanMsg(m, T + 18, "Jirka: STATUS RADAR");        CHECK(g_sent.back().delay == 600, "radar 1 odpovida hned");
+  chanMsg(m, T + 19, "Jirka: STATUS");              CHECK(g_sent.back().delay == REPLY_ALL_DELAY_MS, "STATUS pro vsechny: radar 1 hned po svetlech");
+  strcpy(m.prefs.node_name, "dum-radar-9");
+  chanMsg(m, T + 20, "Jirka: STATUS RADAR");        CHECK(g_sent.back().delay == 600, "radar 9 ve stejnem okne jako 1 (8 oken)");
+  cli(m, 0, "radar on"); g_sent.clear(); g_millis += 100000; pulse(m);
+  CHECK(g_sent.size() == 1 && g_sent[0].delay == 0, "poplach POHYB! bez rozestupu");
+  cli(m, 0, "radar off");
   strcpy(m.prefs.node_name, "dum-radar");
 
   // --- poplach bez kanalu se nehromadi ---
@@ -283,8 +302,11 @@ int main() {
     CHECK(cli(k, 0, "radar prahy") == "Err - radar neodpovida (UART)", "prahy bez radaru: chyba");
     radar_uart.alive = true;
 
-    CHECK(cli(k, 0, "radar prahy") == "prahy T 48 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31 H 45 42 33 32 28 28 28 28 28 28 28 28 28 28 28 28",
-          "RADAR PRAHY cte oba radky prahu");
+    CHECK(cli(k, 0, "radar prahy") == "sepnuti jako vychozi: 48 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31",
+          "RADAR PRAHY: prahy sepnuti s hodnocenim");
+    CHECK(cli(k, 0, "radar prahy h") == "udrzeni jako vychozi: 45 42 33 32 28 28 28 28 28 28 28 28 28 28 28 28",
+          "RADAR PRAHY H: prahy udrzeni");
+    CHECK(cli(k, 0, "radar prahy x") == "<NEZPRACOVANO>", "RADAR PRAHY x neni prikaz");
     CHECK(!radar_uart.open && !radar_uart.config, "po cteni prahu UART vypnuty, radar mimo konfiguraci");
     CHECK(radar_uart.rx_pin == 30 && radar_uart.tx_pin == 31, "UART na pinech NFC");
     CHECK(cli(k, 0, "radar kalibrace 1m") == "Err - doba 2m az 60m", "kratka doba odmitnuta");
@@ -310,13 +332,17 @@ int main() {
     g_millis = ts + 900000 + RADAR_KAL_GRACE_MS - 1; k.radarKalLoop();
     CHECK(g_sent.empty(), "pred koncem skenu nic");
     g_millis = ts + 900000 + RADAR_KAL_GRACE_MS; k.radarKalLoop();
-    CHECK(g_sent.size() == 1 && g_sent[0].text ==
-          "dum-radar: kalibrace hotova T 55 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31 H 45 42 33 32 28 28 28 28 28 28 28 28 28 28 28 20",
-          "po skenu nove prahy do kanalu");
+    CHECK(g_sent.size() == 2 && g_sent[0].text ==
+          "dum-radar: kalibrace: sepnuti mene citlive: 55+7 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31",
+          "po skenu nove prahy sepnuti do kanalu, s rozdilem proti vychozim");
+    CHECK(g_sent.size() == 2 && g_sent[1].text ==
+          "dum-radar: udrzeni jako vychozi: 45 42 33 32 28 28 28 28 28 28 28 28 28 28 28 20-8",
+          "prahy udrzeni druhou zpravou; brana 15 za far=12 se nehodnoti");
+    CHECK(g_sent.size() == 2 && g_sent[0].delay == 6000 && g_sent[1].delay == 7000, "zpravy o kalibraci s rozestupem radaru");
     CHECK(!radar_uart.open && k.kal_state == MyMesh::KAL_IDLE, "po kalibraci UART vypnuty");
     CHECK(cli(k, 0, "status").find(" kal=") == std::string::npos, "STATUS bez kal po kalibraci");
     g_millis += 1000; pulse(k);
-    CHECK(g_sent.size() == 2 && g_sent[1].text.rfind("dum-radar: POHYB!", 0) == 0, "po kalibraci zase hlida");
+    CHECK(g_sent.size() == 3 && g_sent[2].text.rfind("dum-radar: POHYB!", 0) == 0, "po kalibraci zase hlida");
 
     // kanal: doba a cile
     g_sent.clear(); radar_uart.auto_scan = -1;
@@ -332,12 +358,111 @@ int main() {
     CHECK(g_sent.back().text == "dum-radar: kalibrace CHYBA: prahy nejdou precist", "chyba cteni prahu hlasena");
     radar_uart.alive = true;
     chanMsg(k, T2 + 2, "Jirka: RADAR PRAHY");
-    CHECK(g_sent.back().text.rfind("dum-radar: prahy T 55 ", 0) == 0, "kanal RADAR PRAHY");
-    chanMsg(k, T2 + 3, "Jirka: RADAR OFF");
+    CHECK(g_sent.back().text.rfind("dum-radar: sepnuti mene citlive: 55+7 ", 0) == 0, "kanal RADAR PRAHY");
+    chanMsg(k, T2 + 21, "Jirka: RADAR PRAHY H");
+    CHECK(g_sent.back().text.rfind("dum-radar: udrzeni ", 0) == 0, "kanal RADAR PRAHY H");
+
+    // hodnoceni prahu
+    auto line = [&](void) { return cli(k, 0, "radar prahy"); };
+    radar_uart.trig[0] = 48; radar_uart.trig[3] = 32;
+    CHECK(line() == "sepnuti skoro jako vychozi: 48 42 36 32-2 32 31 31 31 31 31 31 31 31 31 31 31", "do +-3 skoro jako vychozi");
+    radar_uart.trig[3] = 29;
+    CHECK(line().rfind("sepnuti citlivejsi: 48 42 36 29-5 ", 0) == 0, "nizsi prah = citlivejsi");
+    radar_uart.trig[5] = 36;
+    CHECK(line().rfind("sepnuti citlivejsi i mene citlive: ", 0) == 0, "obe strany");
+    radar_uart.trig[3] = 20;
+    CHECK(line().rfind("sepnuti POZOR prilis citlive: 48 42 36 20-14 ", 0) == 0, "o 10 a vic citlivejsi = POZOR");
+    radar_uart.trig[3] = 34; radar_uart.trig[5] = 45;
+    CHECK(line().rfind("sepnuti POZOR malo citlive: ", 0) == 0, "o 10 a vic mene citlive = POZOR");
+    radar_uart.trig[5] = 31; radar_uart.trig[14] = 10;
+    CHECK(line().rfind("sepnuti jako vychozi: ", 0) == 0, "brana za far se nehodnoti");
+    radar_uart.far = 16;
+    CHECK(line().rfind("sepnuti POZOR prilis citlive: ", 0) == 0, "far=16 hodnoti vsechny brany");
+    radar_uart.far = 12;
+
+    // nejdelsi zprava o kalibraci se vejde do zpravy v kanalu (140 B vcetne jmena)
+    {
+      uint8_t v[16]; char ln[200];
+      for (int g = 0; g < 16; g++) v[g] = LD_DEF_TRIGGER[g] + (g % 2 ? 9 : -9);
+      thresholdLine(ln, sizeof(ln), "sepnuti", v, LD_DEF_TRIGGER, 15);
+      std::string msg = std::string("dum-radar-12: kalibrace: ") + ln;
+      CHECK(msg.find("citlivejsi i mene citlive") != std::string::npos && msg.size() <= 139, "nejdelsi zprava o kalibraci do 139 znaku");
+    }
+
+    // navrat na vychozi prahy
+    radar_uart.trig[0] = 60; radar_uart.hold[15] = 5;
+    CHECK(cli(k, 0, "radar prahy vychozi") == "VYCHOZI zapsany, sepnuti jako vychozi: 48 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31",
+          "RADAR PRAHY VYCHOZI zapise a overi prahy");
+    CHECK(radar_uart.trig[0] == 48 && radar_uart.trig[14] == 31 && radar_uart.hold[15] == 28 && !radar_uart.config,
+          "vychozi prahy sepnuti i udrzeni v radaru");
+    radar_uart.trig[0] = 60;
+    size_t nv = g_sent.size();
+    chanMsg(k, T2 + 22, "Jirka: RADAR PRAHY VYCHOZI 2");
+    CHECK(g_sent.size() == nv && radar_uart.trig[0] == 60, "RADAR PRAHY VYCHOZI 2 neni pro radar bez cisla");
+    chanMsg(k, T2 + 23, "Jirka: radar prahy výchozí");
+    CHECK(g_sent.back().text.rfind("dum-radar: VYCHOZI zapsany, sepnuti jako vychozi: 48 ", 0) == 0 && radar_uart.trig[0] == 48,
+          "kanal RADAR PRAHY VYCHOZI (i s diakritikou)");
+    radar_uart.alive = false;
+    CHECK(cli(k, 0, "radar prahy reset") == "Err - radar neodpovida (UART)", "VYCHOZI bez radaru: chyba");
+    radar_uart.alive = true;
+    chanMsg(k, T2 + 30, "Jirka: RADAR OFF");
     CHECK(!k.radar_on, "RADAR OFF po zmene parseru funguje");
     size_t nb = g_sent.size();
-    chanMsg(k, T2 + 4, "Jirka: RADAR KALIBRACE 20m 3");
+    chanMsg(k, T2 + 31, "Jirka: RADAR KALIBRACE 20m 3");
     CHECK(g_sent.size() == nb && k.kal_state == MyMesh::KAL_IDLE, "KALIBRACE 20m 3 neni pro radar bez cisla");
+  }
+
+  // --- nastaveni pres CLI (warm-up, pauza, BATKAL) ---
+  {
+    MyMesh c(mb, mr, mc, rg, rc, mt);
+    strcpy(c.prefs.node_name, "dum-radar-1");
+    c.applyChannelSecret((const uint8_t*)"0123456789abcdef0123456789abcdef");
+    board.mv = 3900;
+    CHECK(cli(c, 0, "nastaveni") == std::string("warmup=") + std::to_string(RADAR_STARTUP_SECS) + "s pauza=60s batkal=1.000 bat=3.90V",
+          "NASTAVENI vychozi");
+    CHECK(cli(c, 0, "warmup 5") == "Err - warmup 10 az 900 s", "warmup mimo rozsah");
+    CHECK(cli(c, 0, "WARMUP 120") == "OK warmup=120s" && c.startup_secs == 120, "WARMUP 120");
+    CHECK(cli(c, 0, "warmup") == "warmup=120s", "WARMUP zobrazi");
+    CHECK(cli(c, 0, "pauza 5000") == "Err - pauza 10 az 3600 s", "pauza mimo rozsah");
+    CHECK(cli(c, 0, "pauza 120") == "OK pauza=120s", "PAUZA 120");
+    CHECK(cli(c, 0, "batkal 4,00") == "batkal=1.026 bat=4.00V", "BATKAL podle multimetru (carka)");
+    CHECK(cli(c, 0, "batkal") == "batkal=1.026 bat=4.00V", "BATKAL zobrazi");
+    CHECK(cli(c, 0, "batkal 5.2") .rfind("Err - BATKAL", 0) == 0 && c.batkal == 1026, "BATKAL mimo rozsah");
+    CHECK(cli(c, 0, "nastaveni") == "warmup=120s pauza=120s batkal=1.026 bat=4.00V", "NASTAVENI po zmenach");
+
+    // warm-up 120 s: pohyb v 119. s ignorovan, ve 120. s hlasen
+    g_sent.clear(); c.radar_on = true;
+    g_millis = 2000000; c.radarLoop(false);
+    g_millis = 2000000 + 119000; c.radarLoop(true); c.radarLoop(false);
+    bool quiet = true; for (auto& x : g_sent) if (x.text.find("POHYB") != std::string::npos) quiet = false;
+    CHECK(quiet, "pohyb behem warm-upu 120 s ignorovan");
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: radar pripraven za 60 s (RADAR ON)", "zprava 60 s pred koncem warm-upu");
+    g_millis = 2000000 + 120000; c.radarLoop(false);
+    CHECK(g_sent.back().text == "dum-radar-1: radar pripraven (RADAR ON, SVETLO OFF)" && g_sent.back().delay == 0, "konec warm-upu, radar 1 bez zpozdeni");
+    g_sent.clear();
+    g_millis += 1000; pulse(c);
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: POHYB! bat=4.00V", "pohyb po warm-upu, napeti s korekci");
+    g_millis += 60000; pulse(c);
+    g_millis += 59999; c.radarLoop(false);
+    CHECK(g_sent.size() == 1, "pauza 120 s: po 60 s jeste nic");
+    g_millis += 1; c.radarLoop(false);
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "dum-radar-1: POHYB! bat=4.00V", "po 120 s dalsi zprava");
+    g_millis += 120000; pulse(c); g_millis += 10000; pulse(c); g_millis += 10000; pulse(c); g_millis += 100000; c.radarLoop(false);
+    CHECK(g_sent.size() == 4 && g_sent[3].text == "dum-radar-1: POHYB! 2x za 120s, bat=4.00V", "souhrn uvadi nastavenou pauzu");
+
+    // baterie s korekci: 3,41 V z ADC x 1,026 = 3,50 V -> uz neni slaba
+    g_sent.clear();
+    for (int i = 0; i < 3; i++) { board.mv = 3420; c.onSensorDataRead(); }
+    CHECK(g_sent.empty(), "korekce BATKAL plati i pro hlidani baterie");
+    for (int i = 0; i < 3; i++) { board.mv = 3400; c.onSensorDataRead(); }
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: baterie slaba 3.49 V" && g_sent[0].delay == 0, "slaba baterie s korekci");
+    board.mv = 3900;
+    CHECK(cli(c, 0, "batkal off") == "batkal=1.000 bat=3.90V", "BATKAL OFF");
+
+    // nastaveni jen pres CLI, ne z kanalu
+    size_t n0 = g_sent.size();
+    chanMsg(c, 1950000000, "Jirka: PAUZA 10");
+    CHECK(g_sent.size() == n0 && c.cooldown_secs == 120, "PAUZA z kanalu nejde");
   }
 
   printf("%d kontrol, %d chyb\n", checks, fails);
