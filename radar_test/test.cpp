@@ -10,6 +10,8 @@ struct UartMock {
   uint8_t hold[16] = {45,42,33,32,28,28,28,28,28,28,28,28,28,28,28,28};
   bool config = false;
   uint8_t far = 12;
+  uint32_t delay_s = 10;          // obecny parametr 0x06 (doba drzeni)
+  uint32_t mute_until = 0;        // do tohoto g_millis radar na prikazy neodpovida (uklada prahy)
   int auto_scan = -1;
   std::vector<uint16_t> cmds;
   void setPins(int rx, int tx) { rx_pin = rx; tx_pin = tx; }
@@ -34,7 +36,7 @@ struct UartMock {
   }
   void progress(uint16_t p) { frame(false, {0x03, 0x00, (uint8_t)(p & 0xFF), (uint8_t)(p >> 8)}); }
   size_t write(const uint8_t* f, size_t n) {
-    if (!open || !alive || n < 12 || memcmp(f, "\xFD\xFC\xFB\xFA", 4) != 0) return n;
+    if (!open || !alive || g_millis < mute_until || n < 12 || memcmp(f, "\xFD\xFC\xFB\xFA", 4) != 0) return n;
     uint16_t cmd = f[6] | (f[7] << 8);
     const uint8_t* d = &f[8];
     cmds.push_back(cmd);
@@ -42,7 +44,24 @@ struct UartMock {
     else if (cmd == 0x00FE) { config = false; ack(cmd); }
     else if (!config) { }   // mimo konfiguracni rezim radar neodpovi
     else if (cmd == 0x0009) { auto_scan = d[4] | (d[5] << 8); ack(cmd); }
-    else if (cmd == 0x0071) { ack(cmd, {far, 0, 0, 0}); }   // jen dotaz na 0x05 (nejvzdalenejsi brana)
+    else if (cmd == 0x0071) {   // hodnoty po 4 B v poradi dotazu
+      int dl = (f[4] | (f[5] << 8)) - 2;
+      std::vector<uint8_t> v;
+      for (int k = 0; k + 2 <= dl; k += 2) {
+        uint32_t x = d[k] == 0x05 ? far : d[k] == 0x06 ? delay_s : d[k] == 0x02 ? 40 : d[k] == 0x0C ? 5 : d[k] == 0x0B ? 5 : 0;
+        for (int b = 0; b < 4; b++) v.push_back((x >> (8 * b)) & 0xFF);
+      }
+      ack(cmd, v);
+    }
+    else if (cmd == 0x0070) {
+      int dl = (f[4] | (f[5] << 8)) - 2;
+      for (int k = 0; k + 6 <= dl; k += 6) {
+        uint32_t x = d[k + 2] | (d[k + 3] << 8) | (d[k + 4] << 16) | ((uint32_t)d[k + 5] << 24);
+        if (d[k] == 0x05) far = x;
+        else if (d[k] == 0x06) delay_s = x;
+      }
+      ack(cmd);
+    }
     else if (cmd == 0x0072 || cmd == 0x0076) {
       uint8_t* t = cmd == 0x0072 ? trig : hold;
       int dl = (f[4] | (f[5] << 8)) - 2;
@@ -329,9 +348,15 @@ int main() {
     CHECK(cli(k, 0, "radar prahy") == "KALIBRACE bezi, prahy az po ni", "prahy behem kalibrace ne");
     radar_uart.trig[0] = 55; radar_uart.hold[15] = 20;   // radar si nastavil nove prahy
     uint32_t ts = k.kal_t0;
-    g_millis = ts + 900000 + RADAR_KAL_GRACE_MS - 1; k.radarKalLoop();
-    CHECK(g_sent.empty(), "pred koncem skenu nic");
-    g_millis = ts + 900000 + RADAR_KAL_GRACE_MS; k.radarKalLoop();
+    size_t ncmd = radar_uart.cmds.size();
+    g_millis = ts + 930000; k.radarKalLoop();
+    CHECK(g_sent.empty() && radar_uart.cmds.size() == ncmd, "sken trva dele nez 15 min: bez 100 % se na radar nesaha");
+    radar_uart.progress(100); k.radarKalLoop();
+    CHECK(k.kal_done != 0 && k.kal_state == MyMesh::KAL_SCAN, "100 % zaznamenano");
+    uint32_t td = k.kal_done;
+    g_millis = td + RADAR_KAL_GRACE_MS - 10; k.radarKalLoop();   // napodoba UART pri cteni posune cas o 1 ms
+    CHECK(g_sent.empty() && radar_uart.cmds.size() == ncmd, "radar uklada prahy: jeste se nic neposila");
+    g_millis = td + RADAR_KAL_GRACE_MS; k.radarKalLoop();
     CHECK(g_sent.size() == 2 && g_sent[0].text ==
           "dum-radar: kalibrace: sepnuti mene citlive: 55+7 42 36 34 32 31 31 31 31 31 31 31 31 31 31 31",
           "po skenu nove prahy sepnuti do kanalu, s rozdilem proti vychozim");
@@ -353,14 +378,41 @@ int main() {
     CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar: KALIBRACE za 60s, sken 20 min - odejdi z dosahu", "kanal RADAR KALIBRACE 20m");
     g_millis = k.kal_t0 + 60000; k.radarKalLoop();
     CHECK(radar_uart.auto_scan == 1200, "sken 20 min");
-    radar_uart.alive = false;   // radar mezitim prestal odpovidat
-    g_millis = k.kal_t0 + 1200000 + RADAR_KAL_GRACE_MS; k.radarKalLoop();
-    CHECK(g_sent.back().text == "dum-radar: kalibrace CHYBA: prahy nejdou precist", "chyba cteni prahu hlasena");
+    radar_uart.alive = false;   // radar mezitim prestal odpovidat a 100 % nenahlasil
+    size_t nsent = g_sent.size();
+    g_millis = k.kal_t0 + 1500000 + RADAR_KAL_GRACE_MS - 1; k.radarKalLoop();
+    CHECK(g_sent.size() == nsent && k.kal_tries == 0, "bez 100 % se ceka doba skenu + 25 %");
+    g_millis = k.kal_t0 + 1500000 + RADAR_KAL_GRACE_MS; k.radarKalLoop();
+    CHECK(g_sent.size() == nsent && k.kal_tries == 1 && k.kal_state == MyMesh::KAL_SCAN, "prvni neuspesny pokus, ceka se dal");
+    for (int i = 0; i < 10 && k.kal_state != MyMesh::KAL_IDLE; i++) { g_millis += RADAR_KAL_RETRY_MS; k.radarKalLoop(); }
+    CHECK(k.kal_tries == RADAR_KAL_TRIES && k.kal_state == MyMesh::KAL_IDLE && !radar_uart.open, "po 6 pokusech konec, UART vypnuty");
+    CHECK(g_sent.size() == nsent + 1 && g_sent.back().text == "dum-radar: kalibrace CHYBA: radar neodpovida, vypni a zapni uzel",
+          "chyba hlasena s radou");
     radar_uart.alive = true;
     chanMsg(k, T2 + 2, "Jirka: RADAR PRAHY");
     CHECK(g_sent.back().text.rfind("dum-radar: sepnuti mene citlive: 55+7 ", 0) == 0, "kanal RADAR PRAHY");
     chanMsg(k, T2 + 21, "Jirka: RADAR PRAHY H");
     CHECK(g_sent.back().text.rfind("dum-radar: udrzeni ", 0) == 0, "kanal RADAR PRAHY H");
+
+    // radar po 100 % chvili neodpovida a kalibrace mu prepsala dobu drzeni (videno na LD2410S 8. 10. 2026)
+    g_sent.clear(); radar_uart.auto_scan = -1;
+    CHECK(cli(k, 0, "radar kalibrace 2m") == "KALIBRACE za 60s, sken 2 min - odejdi z dosahu", "kalibrace 2 min");
+    g_millis = k.kal_t0 + 60000; k.radarKalLoop();
+    CHECK(radar_uart.auto_scan == 120, "sken 120 s");
+    radar_uart.delay_s = 40;
+    g_millis = k.kal_t0 + 124000; radar_uart.progress(100); k.radarKalLoop();
+    radar_uart.mute_until = k.kal_done + 25000;
+    g_millis = k.kal_done + RADAR_KAL_GRACE_MS; k.radarKalLoop();
+    CHECK(g_sent.empty() && k.kal_tries == 1 && k.kal_state == MyMesh::KAL_SCAN, "radar jeste neodpovida: dalsi pokus pozdeji");
+    g_millis = k.kal_retry_t + RADAR_KAL_RETRY_MS - 10; k.radarKalLoop();
+    CHECK(g_sent.empty() && k.kal_tries == 1, "dalsi pokus az za 10 s");
+    g_millis = k.kal_retry_t + RADAR_KAL_RETRY_MS; k.radarKalLoop();
+    CHECK(g_sent.size() == 3 && g_sent[2].text == "dum-radar: kalibrace: radar zmenil sve nastaveni, vraceno zpet",
+          "zmena nastaveni radaru ohlasena");
+    CHECK(radar_uart.delay_s == 10, "doba drzeni vracena na 10 s");
+    CHECK(g_sent.size() == 3 && g_sent[2].delay == g_sent[0].delay + 2000, "treti zprava s rozestupem");
+    CHECK(k.kal_state == MyMesh::KAL_IDLE && !radar_uart.open, "konec kalibrace, UART vypnuty");
+    radar_uart.mute_until = 0;
 
     // hodnoceni prahu
     auto line = [&](void) { return cli(k, 0, "radar prahy"); };

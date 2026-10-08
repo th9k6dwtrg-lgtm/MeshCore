@@ -61,7 +61,12 @@ static void lightTimerLoop() {
 #ifndef RADAR_KAL_DELAY_SECS
   #define RADAR_KAL_DELAY_SECS  60   // po prikazu cas odejit z dosahu radaru, pak teprve sken
 #endif
-#define RADAR_KAL_GRACE_MS      20000UL   // po uplynuti skenu jeste pockat na radar, pak precist prahy
+// Po 100 % radar jeste ~10 s uklada prahy a na prikazy neodpovida; dotaz hned po 100 % ho jednou zasekl
+// az do vypnuti napajeni (videno 8. 10. 2026). Proto se ceka na 100 % a jeste RADAR_KAL_GRACE_MS.
+// Sken trva o neco dele nez zadana doba (120 s -> 124 s), bez hlaseni 100 % se ceka doba + 25 %.
+#define RADAR_KAL_GRACE_MS      20000UL
+#define RADAR_KAL_RETRY_MS      10000UL   // kdyz radar po skenu neodpovi, zkusit znovu za 10 s
+#define RADAR_KAL_TRIES         6         // ... nejvyse 6x
 #define RADAR_KAL_TRIGGER_FACTOR  2       // parametry prikazu 0x0009 jako v nastroji Hi-Link
 #define RADAR_KAL_HOLD_FACTOR     1
 #define LD_GATES  16
@@ -75,6 +80,9 @@ static void lightTimerLoop() {
 // Prah je energie, kterou musi pohyb v dane brane prekrocit: vyssi cislo = mene citlive.
 static const uint8_t LD_DEF_TRIGGER[LD_GATES] = {48, 42, 36, 34, 32, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31};
 static const uint8_t LD_DEF_HOLD[LD_GATES]    = {45, 42, 33, 32, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28};
+// obecne parametry: nejvzdalenejsi a nejblizsi brana, doba drzeni, frekvence hlaseni stavu a vzdalenosti, rychlost
+#define LD_NPARAMS  6
+static const uint8_t LD_PARAM_IDS[LD_NPARAMS] = {0x05, 0x0A, 0x06, 0x02, 0x0C, 0x0B};
 #define LD_SAME_DIFF   3   // odchylka do +-3 od vychozi hodnoty = "skoro jako vychozi"
 #define LD_WARN_DIFF  10   // od +-10 "POZOR" (odhad z praxe, ne udaj vyrobce)
 
@@ -154,7 +162,7 @@ public:
   void end() { RADAR_UART.end(); }
 
   // posle prikaz a pocka na potvrzeni (3 pokusy po 300 ms); data odpovedi za stavem do out
-  bool command(uint16_t cmd, const uint8_t* data, int dlen, uint8_t* out = NULL, int out_max = 0) {
+  bool command(uint16_t cmd, const uint8_t* data, int dlen, uint8_t* out = NULL, int out_max = 0, int* out_len = NULL) {
     uint8_t f[4 + 2 + 2 + 6 * LD_GATES + 4];
     int fl = 0;
     memcpy(f, "\xFD\xFC\xFB\xFA", 4); fl = 4;
@@ -174,6 +182,7 @@ public:
         if (l < 4 || (p[0] | (p[1] << 8)) != (cmd | 0x0100)) continue;
         if (p[2] | p[3]) return false;   // radar prikaz odmitl
         if (out) memcpy(out, &p[4], (l - 4) < out_max ? (l - 4) : out_max);
+        if (out_len) *out_len = l - 4;
         return true;
       }
     }
@@ -196,6 +205,7 @@ public:
     uint8_t d[6] = {RADAR_KAL_TRIGGER_FACTOR, 0, RADAR_KAL_HOLD_FACTOR, 0,
                     (uint8_t)(scan_secs & 0xFF), (uint8_t)(scan_secs >> 8)};
     if (!configOn()) return false;
+    saved_ok = readParams(saved);
     bool ok = command(0x0009, d, sizeof(d));
     configOff();   // prubeh radar posila az mimo konfiguracni rezim
     return ok;
@@ -217,6 +227,35 @@ public:
     uint8_t out[4];
     if (!command(0x0071, d, 2, out, 4)) return LD_GATES - 1;
     return (out[0] >= 1 && out[0] < LD_GATES) ? out[0] : LD_GATES - 1;
+  }
+
+  // obecne parametry (far, near, doba drzeni, frekvence hlaseni, rychlost); kalibrace umi prepsat dobu drzeni
+  bool readParams(uint32_t v[LD_NPARAMS]) {
+    uint8_t d[2 * LD_NPARAMS], out[4 * LD_NPARAMS];
+    for (int i = 0; i < LD_NPARAMS; i++) { d[2 * i] = LD_PARAM_IDS[i]; d[2 * i + 1] = 0; }
+    int len = 0;
+    if (!command(0x0071, d, sizeof(d), out, sizeof(out), &len) || len < (int)sizeof(out)) return false;
+    for (int i = 0; i < LD_NPARAMS; i++)
+      v[i] = out[4 * i] | (out[4 * i + 1] << 8) | ((uint32_t)out[4 * i + 2] << 16) | ((uint32_t)out[4 * i + 3] << 24);
+    return true;
+  }
+  uint32_t saved[LD_NPARAMS];   // obecne parametry pred kalibraci
+  bool saved_ok = false;
+
+  // po kalibraci vrati obecne parametry, ktere radar zmenil; vraci pocet vracenych, -1 = chyba
+  int restoreParams() {
+    if (!saved_ok) return 0;
+    uint32_t now[LD_NPARAMS];
+    if (!configOn()) return -1;
+    int n = readParams(now) ? 0 : -1;
+    for (int i = 0; i < LD_NPARAMS && n >= 0; i++) {
+      if (now[i] == saved[i]) continue;
+      uint32_t v = saved[i];
+      uint8_t d[6] = {LD_PARAM_IDS[i], 0, (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+      n = command(0x0070, d, sizeof(d)) ? n + 1 : -1;
+    }
+    configOff();
+    return n;
   }
 
   // precte prahy sepnuti i udrzeni a nejvzdalenejsi branu
@@ -294,6 +333,9 @@ protected:
   uint8_t kal_state = KAL_IDLE;
   uint32_t kal_t0 = 0;            // millis() prikazu (KAL_WAIT) / zacatku skenu (KAL_SCAN)
   uint16_t kal_minutes = RADAR_KAL_MINUTES;
+  uint32_t kal_done = 0;          // millis() hlaseni 100 % (0 = zatim ne)
+  uint8_t kal_tries = 0;          // neuspesne pokusy o cteni prahu po skenu
+  uint32_t kal_retry_t = 0;       // millis() posledniho neuspesneho pokusu
 #ifdef PIN_RADAR_UART_RX
   LD2410S ld;
 #endif
@@ -373,22 +415,35 @@ public:
       }
       kal_state = KAL_SCAN;
       kal_t0 = millis();
+      kal_done = 0;
+      kal_tries = 0;
       return;
     }
-    ld.poll();   // prubeh skenu (jen pro STATUS; jednotku protokol jasne neuvadi, konec se ridi casem)
-    if (el < kal_minutes * 60000UL + RADAR_KAL_GRACE_MS) return;
+    ld.poll();   // prubeh skenu v % (pro STATUS a konec skenu)
+    if (kal_done == 0 && ld.progress >= 100) { kal_done = millis(); if (kal_done == 0) kal_done = 1; }
+    if (kal_done) {
+      if ((uint32_t)(millis() - kal_done) < RADAR_KAL_GRACE_MS) return;
+    } else {   // 100 % neprislo (rusene RX?): doba skenu + 25 %
+      uint32_t scan_ms = kal_minutes * 60000UL;
+      if (el < scan_ms + scan_ms / 4 + RADAR_KAL_GRACE_MS) return;
+    }
+    if (kal_tries > 0 && (uint32_t)(millis() - kal_retry_t) < RADAR_KAL_RETRY_MS) return;
     uint8_t t[LD_GATES], h[LD_GATES];
     int far_gate = LD_GATES - 1;
     bool ok = ld.readAll(t, h, far_gate);
+    if (!ok && ++kal_tries < RADAR_KAL_TRIES) { kal_retry_t = millis(); return; }   // dalsi pokus za 10 s
+    int restored = ok ? ld.restoreParams() : 0;
     ld.end();
     kal_state = KAL_IDLE;
-    if (!ok) { sendChannelText("kalibrace CHYBA: prahy nejdou precist", slotDelay()); return; }
+    if (!ok) { sendChannelText("kalibrace CHYBA: radar neodpovida, vypni a zapni uzel", slotDelay()); return; }
     char body[160];
     strcpy(body, "kalibrace: ");
     thresholdLine(&body[strlen(body)], sizeof(body) - strlen(body), "sepnuti", t, LD_DEF_TRIGGER, far_gate);
     sendChannelText(body, slotDelay());
     thresholdLine(body, sizeof(body), "udrzeni", h, LD_DEF_HOLD, far_gate);
     sendChannelText(body, slotDelay() + 1000);
+    if (restored > 0) sendChannelText("kalibrace: radar zmenil sve nastaveni, vraceno zpet", slotDelay() + 2000);
+    else if (restored < 0) sendChannelText("kalibrace: nastaveni radaru nejde overit", slotDelay() + 2000);
 #endif
   }
 
