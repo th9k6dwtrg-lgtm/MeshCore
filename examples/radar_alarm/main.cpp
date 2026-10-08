@@ -348,7 +348,9 @@ protected:
   //   SVETLO ON / SVETLO OFF  -> zapne / vypne rozsviceni svetla na LIGHT_PULSE_SECS pri pohybu
   //   RON                     -> hned rozsviti svetlo na LIGHT_PULSE_SECS (obdoba LON u zahradnich svetel)
   //   STATUS                  -> stav + napeti baterie + sila signalu posledniho paketu + doba behu
-  //   WDTTEST / ALERTTEST     -> (jen USB) test watchdogu / zkusebni poplach do kanalu
+  //   RADAR PRIKAZY           -> (jen v kanalu) tahak prikazu, kazdy na svem radku; odpovi radar 1
+  //                              (RADAR PRIKAZY 2 = radar 2)
+  //   WDTTEST / ALERTTEST    -> (jen USB) test watchdogu / zkusebni poplach do kanalu
   //
   // Dve cesty, jak prikaz poslat (stejne jako u zahradnich svetel):
   //  1) CLI (USB, nebo LoRa od prihlaseneho admina) - jen tomuto uzlu.
@@ -746,6 +748,29 @@ protected:
     return false;  // ostatni prikazy zpracuje standardni CLI MeshCore
   }
 
+  // RADAR PRIKAZY: tahak vsech prikazu, ktere jdou psat do kanalu (kazdy na svem radku, vic zprav po sobe)
+  void sendPrikazy(uint32_t delay_ms) {
+    static const char* const lines[] = {
+      "RADAR ON - hlidat",
+      "RADAR OFF - nehlidat",
+      "SVETLO ON - svetlo pri pohybu",
+      "SVETLO OFF - pohyb bez svetla",
+      "RON - svetlo hned na " ZSTR(LIGHT_PULSE_SECS) " s",
+      "STATUS RADAR - stav radaru",
+      "STATUS - stav vsech uzlu",
+#ifdef PIN_RADAR_UART_RX
+      "RADAR KALIBRACE - na " ZSTR(RADAR_KAL_MINUTES) " min",
+      "RADAR KALIBRACE 20m - na 20 min",
+      "RADAR PRAHY - prahy sepnuti",
+      "RADAR PRAHY H - prahy udrzeni",
+      "RADAR PRAHY VYCHOZI - tovarni prahy",
+#endif
+      "RADAR PRIKAZY - tento seznam",
+      "RON 2 = jen radar 2",
+    };
+    sendLines(lines, sizeof(lines) / sizeof(lines[0]), delay_ms);
+  }
+
   // ---------- soukromy kanal ----------
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
     char cmd[64];
@@ -772,6 +797,9 @@ protected:
         snprintf(&action[strlen(action)], sizeof(action) - strlen(action), " %s", t);
         t = strtok_r(NULL, " ,", &save);
       }
+    } else if (strcmp(word, "radar") == 0 && t != NULL && isPrikazy(t)) {
+      strcpy(action, "radar prikazy");   // tahak prikazu (posle se az po kontrole cilu)
+      t = strtok_r(NULL, " ,", &save);
     } else if (strcmp(word, "radar") == 0 || strcmp(word, "svetlo") == 0) {
       char* sub = (strcmp(word, "radar") == 0) ? t : strtok_r(NULL, " ,", &save);
       if (sub == NULL) return;
@@ -789,7 +817,8 @@ protected:
     }
 
     int me = nodeNumber();
-    bool for_me = true, for_all = true;
+    bool prikazy = strcmp(action, "radar prikazy") == 0;
+    bool for_me = !prikazy || me <= 1, for_all = true;   // tahak bez cisla posle jen radar 1 (nebo radar bez cisla)
     if (t != NULL) {
       for_me = false; for_all = false;
       for (; t != NULL; t = strtok_r(NULL, " ,", &save)) {
@@ -801,6 +830,8 @@ protected:
 
     // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
     if (!chanReplayOk(sender, ts)) return;
+
+    if (prikazy) { sendPrikazy(REPLY_BASE_MS + slotDelay()); return; }
 
     char result[160];
     if (!execRadar(action, result)) return;

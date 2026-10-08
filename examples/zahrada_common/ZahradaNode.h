@@ -372,4 +372,39 @@ protected:
     sendFlood(pkt, delay_ms + getRNG()->nextInt(0, 400), getNodePrefs()->path_hash_mode + 1);
     return true;
   }
+
+  // Tahak prikazu do kanalu (RADAR PRIKAZY, LIGHT PRIKAZY): kazdy prikaz na svem radku. Radky se poskladaji
+  // do co nejmene zprav "prikazy 1/3:", "prikazy 2/3:" ... (kazda i se jmenem uzlu do CHAN_TEXT_MAX znaku),
+  // zpravy jdou po sobe s odstupem PAGE_GAP_MS. Prvni slovo "prikazy" neni prikaz, tahak tedy nic nespusti.
+  #define CHAN_TEXT_MAX   139   // nejdelsi zprava, kterou aplikace MeshCore posle (vcetne "<jmeno>: ")
+  #define PAGE_GAP_MS    3000   // odstup zprav jednoho tahaku
+  int sendLines(const char* const lines[], int n, uint32_t delay_ms) {
+    int room = CHAN_TEXT_MAX - (int)strlen(getNodePrefs()->node_name) - 2 - 12;   // 12 = "prikazy 1/3:"
+    if (room < 40) room = 40;   // (velmi dlouhe jmeno uzlu: konec zpravy se muze oriznout)
+    int total = 0;
+    for (int pass = 0; pass < 2; pass++) {   // 1. pruchod spocita zpravy, 2. je posle
+      int page = 0, i = 0;
+      while (i < n) {
+        char body[CHAN_TEXT_MAX + 1];
+        int bl = 0, used = 0;
+        if (pass == 1) bl = total > 1 ? sprintf(body, "prikazy %d/%d:", page + 1, total) : sprintf(body, "prikazy:");
+        do {
+          int ll = strlen(lines[i]);
+          if (used > 0 && used + 1 + ll > room) break;
+          if (pass == 1 && bl < (int)sizeof(body)) bl += snprintf(&body[bl], sizeof(body) - bl, "\n%s", lines[i]);
+          used += 1 + ll;
+          i++;
+        } while (i < n);
+        if (pass == 1) sendChannelText(body, delay_ms + page * PAGE_GAP_MS);
+        page++;
+      }
+      total = page;
+    }
+    return total;
+  }
+  // "prikazy" i s hackem a carkou (aplikace posila UTF-8, velka pismena s diakritikou se neprevadi)
+  static bool isPrikazy(const char* w) { return strcmp(w, "prikazy") == 0 || strcmp(w, "příkazy") == 0; }
 };
+
+#define ZSTR_(x) #x
+#define ZSTR(x)  ZSTR_(x)    // cislo z #define jako text (do tahaku prikazu)

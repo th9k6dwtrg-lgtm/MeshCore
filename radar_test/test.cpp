@@ -284,6 +284,55 @@ int main() {
   strcpy(m.prefs.node_name, "RADAR 3"); board.setGpio(0);
   chanMsg(m, T + 23, "Jirka: RON 3");               CHECK(board.light_state == 1 && g_sent.back().text == "RADAR 3: ON 3s c.4 bat=3.90V", "jmeno RADAR 3 -> radar cislo 3");
   CHECK(g_sent.back().delay == 600 + 2 * 1500, "RADAR 3 odpovida ve 3. okne");
+  // RADAR PRIKAZY: tahak, kazdy prikaz na svem radku, bez cisla odpovi jen radar 1
+  before = g_sent.size();
+  chanMsg(m, T + 24, "Jirka: RADAR PRIKAZY");       CHECK(g_sent.size() == before, "RADAR PRIKAZY bez cisla: RADAR 3 mlci");
+  chanMsg(m, T + 25, "Jirka: radar prikazy 3");     CHECK(g_sent.size() > before && g_sent[before].text.rfind("RADAR 3: prikazy 1/", 0) == 0, "RADAR PRIKAZY 3 posle radar 3");
+  CHECK(g_sent[before].delay == 600 + 2 * 1500, "tahak radaru 3 ve 3. okne");
+  strcpy(m.prefs.node_name, "RADAR 1");
+  g_sent.clear();
+  chanMsg(m, T + 26, "Jirka: RADAR PRIKAZY");
+  {
+    std::string all;
+    bool fits = true, order = true, starts = true;
+    for (size_t i = 0; i < g_sent.size(); i++) {
+      const std::string& s = g_sent[i].text;
+      fits = fits && s.size() <= 139;
+      order = order && g_sent[i].delay == 600 + i * 3000;
+      std::string hdr = "RADAR 1: prikazy " + std::to_string(i + 1) + "/" + std::to_string(g_sent.size()) + ":\n";
+      starts = starts && s.rfind(hdr, 0) == 0;
+      all += s.substr(s.find('\n')) ;
+    }
+    CHECK(g_sent.size() == 4, "RADAR PRIKAZY: 4 zpravy pro RADAR 1");
+    CHECK(fits, "kazda zprava tahaku do 139 znaku");
+    CHECK(order, "zpravy tahaku po 3 s");
+    CHECK(starts, "zpravy cislovane prikazy 1/4 ... 4/4");
+    for (const char* c : {"\nRADAR ON - ", "\nRADAR OFF - ", "\nSVETLO ON - ", "\nSVETLO OFF - ", "\nRON - svetlo hned na 3 s",
+                          "\nSTATUS RADAR - ", "\nSTATUS - ", "\nRADAR KALIBRACE - na 15 min", "\nRADAR KALIBRACE 20m - ",
+                          "\nRADAR PRAHY - ", "\nRADAR PRAHY H - ", "\nRADAR PRAHY VYCHOZI - ", "\nRADAR PRIKAZY - ", "\nRON 2 = "})
+      CHECK(all.find(c) != std::string::npos, (std::string("tahak obsahuje") + c).c_str());
+    // tahak nikoho nespusti: radar ho ignoruje podle jmena, prvni slovo "prikazy" neni prikaz
+    strcpy(m.prefs.node_name, "RADAR 2");
+    size_t n0 = g_sent.size();
+    chanMsg(m, T + 27, "RADAR 1: prikazy 1/4:\nRADAR ON - hlidat");
+    chanMsg(m, T + 28, "Jirka: prikazy 1/4:\nRADAR ON - hlidat");
+    CHECK(g_sent.size() == n0, "tahak jineho radaru neni prikaz");
+    strcpy(m.prefs.node_name, "RADAR 1");
+  }
+  chanMsg(m, T + 29, "Jirka: radar příkazy");       CHECK(g_sent.size() == 8, "radar příkazy s diakritikou");
+  chanMsg(m, T + 30, "Jirka: RADAR PRIKAZY 2");     CHECK(g_sent.size() == 8, "RADAR PRIKAZY 2 neni pro radar 1");
+  chanMsg(m, T + 30, "Jirka: LIGHT PRIKAZY");       CHECK(g_sent.size() == 8, "LIGHT PRIKAZY radar ignoruje");
+  chanMsg(m, T + 30, "LIGHT 1: prikazy:\nLON - svetlo na 5 s"); CHECK(g_sent.size() == 8, "tahak svetla radar ignoruje");
+  strcpy(m.prefs.node_name, "dum-radar");
+  chanMsg(m, T + 31, "Jirka: RADAR PRIKAZY");       CHECK(g_sent.size() > 8 && g_sent[8].delay == 600 + 6000, "radar bez cisla odpovi na RADAR PRIKAZY (5. okno)");
+  {
+    bool fits = true;
+    strcpy(m.prefs.node_name, "zahrada-radar-zadni-12"); size_t n0 = g_sent.size();
+    chanMsg(m, T + 32, "Jirka: RADAR PRIKAZY 12");
+    for (size_t i = n0; i < g_sent.size(); i++) fits = fits && g_sent[i].text.size() <= 139 && g_sent[i].text.back() != '\n';
+    CHECK(g_sent.size() >= n0 + 4 && fits, "dlouhe jmeno: vic zprav, kazda do 139 znaku");
+    CHECK(g_sent.back().text.find("RON 2 = jen radar 2") != std::string::npos, "dlouhe jmeno: posledni radek se neztratil");
+  }
   strcpy(m.prefs.node_name, "dum-radar-2");
   board.setGpio(0);
   cli(m, 0, "radar on"); g_sent.clear(); g_millis += 100000; pulse(m);

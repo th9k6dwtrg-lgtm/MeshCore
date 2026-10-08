@@ -94,6 +94,26 @@ int main() {
   chanMsg(m, T + 19, "Jirka: STATUS");     CHECK(g_sent.size() == before + 1 && g_sent.back().text.rfind("svetlo-1: OFF bat=", 0) == 0, "STATUS v kanalu");
   strcpy(m.prefs.node_name, "svetlo-4");
   chanMsg(m, T + 20, "Jirka: STATUS");     CHECK(g_sent.back().delay == 600 + 3*1500, "zpozdeni svetla 4");
+  // LIGHT PRIKAZY: tahak prikazu, bez cisla odpovi jen svetlo 1
+  before = g_sent.size();
+  chanMsg(m, T + 21, "Jirka: LIGHT PRIKAZY");   CHECK(g_sent.size() == before, "LIGHT PRIKAZY bez cisla: svetlo 4 mlci");
+  chanMsg(m, T + 22, "Jirka: light prikazy 4"); CHECK(g_sent.size() == before + 1 && g_sent.back().delay == 600 + 3*1500, "LIGHT PRIKAZY 4 posle svetlo 4");
+  strcpy(m.prefs.node_name, "LIGHT 1");
+  before = g_sent.size();
+  chanMsg(m, T + 23, "Jirka: Light Prikazy");
+  CHECK(g_sent.size() == before + 1 && g_sent.back().text ==
+        "LIGHT 1: prikazy:\nLON - svetlo na 5 s\nLOFF - zhasnout\nSTATUS - stav vsech uzlu\nLIGHT PRIKAZY - tento seznam\nLON 2 = jen svetlo 2",
+        "LIGHT PRIKAZY: jedna zprava, kazdy prikaz na svem radku");
+  CHECK(g_sent.back().text.size() <= 139 && g_sent.back().delay == 600, "tahak do 139 znaku, svetlo 1 hned");
+  chanMsg(m, T + 24, "Jirka: light příkazy");   CHECK(g_sent.size() == before + 2, "light příkazy s diakritikou");
+  chanMsg(m, T + 25, "Jirka: LIGHT PRIKAZY 2"); CHECK(g_sent.size() == before + 2, "LIGHT PRIKAZY 2 neni pro svetlo 1");
+  chanMsg(m, T + 26, "Jirka: LIGHT");           CHECK(g_sent.size() == before + 2, "samotne LIGHT nic");
+  chanMsg(m, T + 27, "Jirka: LIGHT ON");        CHECK(g_sent.size() == before + 2 && board.light_state == 0, "LIGHT ON neni prikaz");
+  chanMsg(m, T + 28, "RADAR 1: prikazy 1/4:\nRADAR ON - hlidat"); CHECK(g_sent.size() == before + 2, "tahak radaru svetlo ignoruje");
+  chanMsg(m, T + 29, "LIGHT 2: prikazy:\nLON - svetlo na 5 s"); CHECK(g_sent.size() == before + 2 && board.light_state == 0, "tahak jineho svetla ignorovan");
+  chanMsg(m, T + 30, "Jirka: RADAR PRIKAZY");   CHECK(g_sent.size() == before + 2, "RADAR PRIKAZY svetlo ignoruje");
+  strcpy(m.prefs.node_name, "zahrada-svetlo");
+  chanMsg(m, T + 31, "Jirka: LIGHT PRIKAZY");   CHECK(g_sent.size() == before + 3 && g_sent.back().delay == 600 + 4*1500, "svetlo bez cisla odpovi (5. okno)");
   strcpy(m.prefs.node_name, "svetlo-1");
 
   // --- upozorneni na baterii (jen do kanalu) ---

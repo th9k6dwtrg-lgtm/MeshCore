@@ -44,6 +44,7 @@ protected:
   //              (c. = poradove cislo rozsviceni od zapnuti uzlu)
   //   LOFF    -> svetlo hned zhasne
   //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
+  //   LIGHT PRIKAZY -> (jen v kanalu) tahak prikazu, kazdy na svem radku; odpovi svetlo 1 (LIGHT PRIKAZY 2 = svetlo 2)
   //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
   //   ALERTTEST -> (jen USB) posle zkusebni upozorneni do kanalu
   //   CHAN, BATKAL -> klic kanalu a korekce baterie (spolecne s radarem, viz ZahradaNode.h)
@@ -120,11 +121,14 @@ protected:
     char* save = NULL;
     char* word = strtok_r(cmd, " ", &save);
     if (word == NULL) return;
-    if (strcmp(word, "lon") && strcmp(word, "loff") && strcmp(word, "status")) return;  // neni pro nas (napr. odpovedi ostatnich svetel)
+    char* t = strtok_r(NULL, " ,", &save);
+    // "LIGHT PRIKAZY" = tahak prikazu; bez cisla odpovi jen svetlo 1 (nebo svetlo bez cisla), "LIGHT PRIKAZY 2" svetlo 2
+    bool prikazy = strcmp(word, "light") == 0 && t != NULL && isPrikazy(t);
+    if (prikazy) t = strtok_r(NULL, " ,", &save);
+    else if (strcmp(word, "lon") && strcmp(word, "loff") && strcmp(word, "status")) return;  // neni pro nas (napr. odpovedi ostatnich svetel)
 
     int me = nodeNumber();
-    bool for_me = true;
-    char* t = strtok_r(NULL, " ,", &save);
+    bool for_me = !prikazy || me <= 1;
     if (t != NULL) {
       for_me = false;
       for (; t != NULL; t = strtok_r(NULL, " ,", &save)) {
@@ -135,6 +139,18 @@ protected:
 
     // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
     if (!chanReplayOk(sender, ts)) return;
+
+    if (prikazy) {
+      static const char* const lines[] = {
+        "LON - svetlo na " ZSTR(LIGHT_ON_SECS) " s",
+        "LOFF - zhasnout",
+        "STATUS - stav vsech uzlu",
+        "LIGHT PRIKAZY - tento seznam",
+        "LON 2 = jen svetlo 2",
+      };
+      sendLines(lines, sizeof(lines) / sizeof(lines[0]), REPLY_BASE_MS + slotDelay());
+      return;
+    }
 
     char result[96];
     if (!execLight(word, result)) return;
