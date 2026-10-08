@@ -643,6 +643,86 @@ int main() {
     CHECK(g_sent.size() == n0 && c.cooldown_secs == 120, "PAUZA z kanalu nejde");
   }
 
+  // --- hlidani funkcnosti radaru: UART kazdych 6 h, OT2 trvale v pritomnosti ---
+  {
+    const uint32_t W = RADAR_STARTUP_MS, B = 3000000;
+    MyMesh h(mb, mr, mc, rg, rc, mt);
+    strcpy(h.prefs.node_name, "RADAR 1");
+    h.applyChannelSecret((const uint8_t*)"0123456789abcdef0123456789abcdef");
+    h.radar_on = true;
+    radar_uart.alive = true; g_sent.clear();
+    g_millis = B; h.radarLoop(false);
+    size_t nc = radar_uart.cmds.size();
+    g_millis = B + W / 2 - 1; h.radarLoop(false);
+    CHECK(h.uart_ok == -1 && radar_uart.cmds.size() == nc, "pred polovinou ustalovani se UART nekontroluje");
+    g_millis = B + W / 2; h.radarLoop(false);
+    CHECK(h.uart_ok == 1 && radar_uart.cmds.size() > nc, "v polovine ustalovani kontrola UART: radar odpovida");
+    g_millis = B + W; h.radarLoop(false);
+    CHECK(g_sent.back().text == "RADAR 1: radar pripraven (RADAR ON, SVETLO OFF)", "pripraven bez varovani");
+    nc = radar_uart.cmds.size();
+    g_millis = B + W + 1000; h.radarCheckLoop();
+    CHECK(radar_uart.cmds.size() == nc, "dalsi kontrola az za 6 h");
+    // radar zamrzne
+    radar_uart.alive = false; g_sent.clear();
+    uint32_t t6 = h.check_t + RADAR_CHECK_HOURS * 3600000UL;
+    g_millis = t6 - 1; h.radarCheckLoop();  CHECK(h.check_fails == 0 && radar_uart.cmds.size() == nc, "kontrola presne po 6 h");
+    g_millis = t6; h.radarCheckLoop();      CHECK(h.check_fails == 1 && g_sent.empty(), "1. neodpoved: jeste bez varovani");
+    g_millis = t6 + 59999; h.radarCheckLoop(); CHECK(h.check_fails == 1, "dalsi pokus az za minutu");
+    g_millis = t6 + 60000; h.radarCheckLoop(); CHECK(h.check_fails == 2 && g_sent.empty(), "2. neodpoved: jeste bez varovani");
+    g_millis = t6 + 120000; h.radarCheckLoop();
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "RADAR 1: POZOR radar neodpovida (UART), asi nehlida. Vypni a zapni napajeni uzlu" &&
+          h.radar_dead && g_sent[0].text.size() <= 139, "3. neodpoved -> jedno varovani do kanalu");
+    CHECK(cli(h, 0, "status").find(" uart=chyba") != std::string::npos, "STATUS ukazuje chybu UART");
+    g_millis = t6 + 180000; h.radarCheckLoop();
+    CHECK(g_sent.size() == 1 && h.check_fails == 0, "varovani jen jednou, dalsi kontrola az za 6 h");
+    radar_uart.alive = true;   // vypnuti a zapnuti napajeni
+    g_millis = h.check_t + RADAR_CHECK_HOURS * 3600000UL; h.radarCheckLoop();
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "RADAR 1: radar zase odpovida (UART)" && !h.radar_dead, "radar zase odpovida -> zprava");
+    CHECK(cli(h, 0, "status").find("uart=") == std::string::npos, "STATUS bez chyby UART");
+    // behem kalibrace se UART nekontroluje
+    h.kal_state = MyMesh::KAL_SCAN; nc = radar_uart.cmds.size();
+    g_millis += RADAR_CHECK_HOURS * 3600000UL; h.radarCheckLoop();
+    CHECK(radar_uart.cmds.size() == nc, "behem kalibrace bez kontroly UART");
+    h.kal_state = MyMesh::KAL_IDLE; h.radarCheckLoop();
+
+    // OT2 drzi pritomnost 30 min
+    g_sent.clear();
+    uint32_t t0 = g_millis + 10000;
+    g_millis = t0; h.radarLoop(true);
+    CHECK(g_sent.size() == 1 && g_sent[0].text.find("POHYB!") != std::string::npos, "pohyb hlasen");
+    g_millis = t0 + RADAR_STUCK_MIN * 60000UL - 1; h.radarLoop(true);
+    CHECK(g_sent.size() == 1, "pritomnost 29:59 min: nic");
+    g_millis = t0 + RADAR_STUCK_MIN * 60000UL; h.radarLoop(true);
+    CHECK(g_sent.size() == 2 && g_sent[1].text == "RADAR 1: POZOR radar hlasi pritomnost uz 30 min, novy pohyb nepozna",
+          "30 min pritomnosti -> varovani");
+    g_millis += 3600000; h.radarLoop(true);
+    CHECK(g_sent.size() == 2, "varovani o pritomnosti jen jednou");
+    h.radarLoop(false); g_millis += 1000; h.radarLoop(true);
+    CHECK(g_sent.size() == 3 && g_sent[2].text.find("POHYB! c.2") != std::string::npos, "po poklesu OT2 se novy pohyb zase hlasi");
+    h.radarLoop(false); h.radar_on = false;
+    g_millis += 1000; h.radarLoop(true); g_millis += RADAR_STUCK_MIN * 60000UL; h.radarLoop(true);
+    CHECK(g_sent.size() == 3, "RADAR OFF: bez varovani o pritomnosti");
+    h.radarLoop(false);
+  }
+  {   // UART neni zapojeny: pripraven to rekne, varovani se neposilaji
+    const uint32_t W = RADAR_STARTUP_MS, B = 90000000;
+    MyMesh u(mb, mr, mc, rg, rc, mt);
+    strcpy(u.prefs.node_name, "RADAR 2");
+    u.applyChannelSecret((const uint8_t*)"0123456789abcdef0123456789abcdef");
+    u.radar_on = true;
+    radar_uart.alive = false; g_sent.clear();
+    g_millis = B; u.radarLoop(false);
+    g_millis = B + W / 2; u.radarLoop(false);
+    CHECK(u.uart_ok == 0, "UART bez odpovedi od startu");
+    g_millis = B + W; u.radarLoop(false);
+    CHECK(g_sent.back().text == "RADAR 2: radar pripraven (RADAR ON, SVETLO OFF), POZOR UART neodpovida", "pripraven hlasi nefunkcni UART");
+    size_t n0 = g_sent.size();
+    for (int i = 0; i < 4; i++) { g_millis = u.check_t + RADAR_CHECK_HOURS * 3600000UL; u.radarCheckLoop(); }
+    CHECK(g_sent.size() == n0 && !u.radar_dead, "bez zapojeneho UART zadna varovani");
+    CHECK(cli(u, 0, "status").find(" uart=chyba") != std::string::npos, "STATUS: uart=chyba");
+    radar_uart.alive = true;
+  }
+
   printf("%d kontrol, %d chyb\n", checks, fails);
   return fails ? 1 : 0;
 }

@@ -69,6 +69,15 @@ static void lightTimerLoop() {
 #define RADAR_UART_QUIET_MS     5000UL    // po prikazech pres UART 5 s nehlasit pohyb (OT2 muze preblikout)
 #define RADAR_KAL_RETRY_MS      10000UL   // kdyz radar po skenu neodpovi, zkusit znovu za 10 s
 #define RADAR_KAL_TRIES         6         // ... nejvyse 6x
+// Hlidani funkcnosti radaru: zamrzly radar (8. 10. 2026) nebo prerusene OT2 by jinak tise prestaly hlasit pohyb.
+#ifndef RADAR_CHECK_HOURS
+  #define RADAR_CHECK_HOURS     6     // jak casto se overi, ze radar odpovida na UART
+#endif
+#define RADAR_CHECK_RETRY_MS    60000UL   // po neodpovedi zkusit znovu za minutu ...
+#define RADAR_CHECK_TRIES       3         // ... a po 3 neuspesnych pokusech poslat varovani
+#ifndef RADAR_STUCK_MIN
+  #define RADAR_STUCK_MIN       30    // OT2 drzi pritomnost dele nez 30 min -> varovani (novy pohyb nepozna)
+#endif
 #define RADAR_KAL_TRIGGER_FACTOR  2       // parametry prikazu 0x0009 jako v nastroji Hi-Link
 #define RADAR_KAL_HOLD_FACTOR     1
 #define LD_GATES  16
@@ -373,6 +382,10 @@ protected:
   //     "RADAR ON" apod. by jinak ostatni radary braly jako prikaz a odpovidaly si navzajem dokola.
   //  Klic kanalu (CHAN) a korekce baterie (BATKAL) jsou spolecne se svetly, viz ZahradaNode.h.
   //  Po kazdem zapnuti zacina s RADAR ON a SVETLO OFF (RADAR_BOOT_ON, SVETLO_BOOT_ON), prikaz plati do vypnuti.
+  //  Hlidani funkcnosti: v polovine ustalovani a pak kazdych RADAR_CHECK_HOURS se radar zepta pres UART; kdyz
+  //  3x po minute neodpovi, posle "POZOR radar neodpovida" (jen kdyz UART nekdy fungoval; "radar pripraven" rekne,
+  //  kdyz UART od startu neodpovida). Drzi-li OT2 pri RADAR ON pritomnost RADAR_STUCK_MIN minut, posle varovani,
+  //  protoze dalsi pohyb radar nepozna, dokud OT2 nespadne.
 
   bool radar_on = false;          // hlidani zapnuto
   bool light_on = false;          // rozsviceni pri pohybu zapnuto
@@ -407,6 +420,14 @@ protected:
   bool uart_quiet = false;        // chvili po UART komunikaci s radarem se OT2 nevyhodnocuje
   uint32_t uart_quiet_t = 0;
   void uartDone() { uart_quiet = true; uart_quiet_t = millis(); }
+
+  // hlidani funkcnosti radaru (RADAR_CHECK_HOURS, RADAR_STUCK_MIN)
+  int8_t uart_ok = -1;            // -1 = jeste neovereno, 0 = od startu neodpovedel (UART asi neni zapojeny), 1 = odpovida
+  bool radar_dead = false;        // varovani "radar neodpovida" odeslano
+  uint8_t check_fails = 0;        // neuspesne kontroly po sobe
+  uint32_t check_t = 0;           // millis() posledni kontroly
+  uint32_t ot2_high_t = 0;        // millis() posledni nabezne hrany OT2 (od kdy drzi pritomnost)
+  bool stuck_sent = false;        // varovani o trvale pritomnosti odeslano
 #ifdef PIN_RADAR_UART_RX
   LD2410S ld;
 #endif
@@ -422,12 +443,13 @@ public:
     if (!radar_seen) {   // prvni cteni po startu: pritomnost, ktera uz trva, neni novy pohyb
       radar_seen = true;
       radar_start = millis();
+      ot2_high_t = millis();
       motion_prev = motion;
       return;
     }
     bool rising = motion && !motion_prev;    // novy pohyb = nabezna hrana OT2
     motion_prev = motion;
-    if (rising) ot2_edges++;
+    if (rising) { ot2_edges++; ot2_high_t = millis(); }
     uint32_t since_start = (uint32_t)(millis() - radar_start);
     uint32_t startup_ms = (uint32_t)startup_secs * 1000UL;
     // ustalovani jen jednou po startu (po preteceni millis() za 49,7 dne by jinak radar znovu oslepl)
@@ -446,11 +468,27 @@ public:
       sendChannelText(body, slotDelay());
       ready_warn_sent = true;
     }
+#ifdef PIN_RADAR_UART_RX
+    // prvni kontrola UART v polovine ustalovani (radar uz nabehl, pripadne preblikuti OT2 se stejne nehodnoti)
+    if (uart_ok < 0 && settling && since_start >= startup_ms / 2 && since_start + RADAR_UART_QUIET_MS <= startup_ms && !kal)
+      radarCheck();
+#endif
     if (!ready_sent && !settling) {
-      char body[48];
-      snprintf(body, sizeof(body), "radar pripraven (RADAR %s, SVETLO %s)", radar_on ? "ON" : "OFF", light_on ? "ON" : "OFF");
+      char body[80];
+      snprintf(body, sizeof(body), "radar pripraven (RADAR %s, SVETLO %s)%s", radar_on ? "ON" : "OFF", light_on ? "ON" : "OFF",
+               uart_ok == 0 ? ", POZOR UART neodpovida" : "");
       sendChannelText(body, slotDelay());
       ready_warn_sent = ready_sent = true;
+    }
+
+    // OT2 drzi pritomnost dlouho: dokud nespadne, radar dalsi pohyb nepozna (zamrzly radar, moc citlive prahy)
+    if (!motion) stuck_sent = false;
+    if (motion && radar_on && !settling && !kal && !stuck_sent &&
+        (uint32_t)(millis() - ot2_high_t) >= RADAR_STUCK_MIN * 60000UL) {
+      char body[72];
+      snprintf(body, sizeof(body), "POZOR radar hlasi pritomnost uz %d min, novy pohyb nepozna", RADAR_STUCK_MIN);
+      sendChannelText(body, slotDelay());
+      stuck_sent = true;
     }
 
     if (rising && radar_on && !settling && !kal) {
@@ -480,6 +518,40 @@ public:
       alarm_pending = 0;
     }
   }
+
+  // ---------- kontrola, ze radar odpovida na UART: volat v kazdem pruchodu loop() ----------
+  // Kazdych RADAR_CHECK_HOURS (pri neodpovedi za minutu, nejvys RADAR_CHECK_TRIES x) jednoduchy dotaz pres UART.
+  // Varovani jen kdyz radar uz nekdy odpovedel: bez zapojeneho UART se nehlida (pripraven hlasi "UART neodpovida").
+  void radarCheckLoop() {
+#ifdef PIN_RADAR_UART_RX
+    if (!settled || kal_state != KAL_IDLE) return;
+    uint32_t wait = check_fails > 0 ? RADAR_CHECK_RETRY_MS : (uint32_t)RADAR_CHECK_HOURS * 3600000UL;
+    if (uart_ok >= 0 && (uint32_t)(millis() - check_t) < wait) return;
+    if (radarCheck()) {
+      if (radar_dead) sendChannelText("radar zase odpovida (UART)", slotDelay());
+      radar_dead = false;
+      check_fails = 0;
+      return;
+    }
+    if (uart_ok != 1 || radar_dead) return;            // UART neni zapojeny / varovani uz odeslo
+    if (++check_fails < RADAR_CHECK_TRIES) return;     // dalsi pokus za minutu
+    check_fails = 0;
+    radar_dead = true;
+    sendChannelText("POZOR radar neodpovida (UART), asi nehlida. Vypni a zapni napajeni uzlu", slotDelay());
+#endif
+  }
+
+#ifdef PIN_RADAR_UART_RX
+  bool radarCheck() {   // radar odpovi na vstup a vystup z konfiguracniho rezimu?
+    check_t = millis();
+    ld.begin();
+    bool ok = ld.configOn() && ld.configOff();
+    ld.end(); uartDone();
+    if (ok) uart_ok = 1;
+    else if (uart_ok < 0) uart_ok = 0;
+    return ok;
+  }
+#endif
 
   // ---------- kalibrace: volat v kazdem pruchodu loop() ----------
   void radarKalLoop() {
@@ -649,6 +721,7 @@ protected:
               radio_driver.getLastSNR(),
               (unsigned)(up_min / 1440), (unsigned)((up_min / 60) % 24), (unsigned)(up_min % 60));
 #ifdef PIN_RADAR_UART_RX
+      if (radar_dead || uart_ok == 0) strcat(reply, " uart=chyba");
       if (kal_state == KAL_WAIT) strcat(reply, " kal=start");
       else if (kal_state == KAL_SCAN) {
         if (ld.progress >= 0) sprintf(&reply[strlen(reply)], " kal=%d", ld.progress);
@@ -972,6 +1045,7 @@ void loop() {
   the_mesh.loop();
   the_mesh.radarLoop(digitalRead(PIN_RADAR_OUT) == HIGH);
   the_mesh.radarKalLoop();
+  the_mesh.radarCheckLoop();
   lightTimerLoop();
   sensors.loop();
 #ifdef DISPLAY_CLASS
