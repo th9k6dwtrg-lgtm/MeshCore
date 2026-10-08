@@ -31,7 +31,7 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 |---|---|---|
 | `RADAR ON` / `RADAR OFF` | zapne / vypne hlídání | `dum-radar: RADAR ON` |
 | `SVETLO ON` / `SVETLO OFF` | zapne / vypne rozsvícení na 3 s při pohybu | `dum-radar: SVETLO ON` |
-| `SVETLO TEST` | rozsvítí na 3 s | `dum-radar: SVETLO TEST 3s` |
+| `SVETLO RADAR` | hned rozsvítí na 3 s (obdoba `LON`), i při `SVETLO OFF` | `dum-radar: SVETLO RADAR 3s` |
 | `STATUS RADAR` | stav radaru | `dum-radar: RADAR ON SVETLO OFF ot2=0/7 pohyb=3 (5m) bat=3.95V rssi=-60 snr=9.5 up=0d02h15m` |
 | `RADAR KALIBRACE` | za 60 s spustí automatické prahy radaru, sken 15 min (`RADAR KALIBRACE 20m` = 20 min, 2–60) | `dum-radar: KALIBRACE za 60s, sken 15 min - odejdi z dosahu` |
 | `RADAR PRAHY` | prahy sepnutí bran 0–15 s hodnocením proti výchozím (viz níže) | `dum-radar: sepnuti citlivejsi: 44-4 42 36 …` |
@@ -40,7 +40,7 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 | `STATUS` | odpoví všechny uzly v kanálu, radar až po světlech 1–4 (6,6 s) | jako výše |
 
 - `ot2` = okamžitý stav výstupu radaru (1 = přítomnost) / počet jeho sepnutí od startu (počítá i při RADAR OFF, slouží k testu radaru). `pohyb` = počet pohybů od `RADAR ON`, v závorce kdy byl poslední. `rssi/snr` = poslední přijatý paket (tj. tento příkaz, od nejbližšího souseda).
-- Více radarů: číslo na konci jména (`dum-radar-2`), pak `RADAR OFF 2`, `STATUS 2`. Bez čísla platí pro všechny radary.
+- Více radarů: číslo na konci jména (`dum-radar-2`), pak `RADAR OFF 2`, `SVETLO RADAR 2`, `STATUS 2`. Číslo jde přidat ke každému příkazu radaru (i víc čísel, `SVETLO RADAR 1 3`). Bez čísla platí pro všechny radary.
 - **Rozestupy odpovědí** jako u světel: radar 1 odpovídá za 0,6 s, radar 2 o 1,5 s později, …, radar bez čísla jako 5. (8 oken, radar 9 = okno radaru 1). Na `STATUS` pro všechny se celé pořadí posune až za světla (+6,6 s). Stejně se rozkládají i zprávy „radar pripraven“, baterie a výsledky kalibrace. `POHYB!` jde vždy hned.
 - Zahradní světla na `STATUS RADAR`, `RADAR …` ani `SVETLO …` nereagují; radar nereaguje na `LON/LOFF`.
 - Po každém zapnutí nebo restartu začíná radar s `RADAR ON` a `SVETLO OFF` (`RADAR_BOOT_ON`, `SVETLO_BOOT_ON`), změna příkazem platí jen do vypnutí. Klíč kanálu je v `/radar_ch`.
@@ -67,7 +67,7 @@ Korekce `BATKAL` platí pro napětí ve zprávách, `STATUS` i hlídání slabé
 Kanál (`CHAN`, ochrana proti přehrání, odesílání zpráv), hlídání baterie s `BATKAL`, rozestupy podle čísla uzlu, watchdog a doba běhu jsou v `examples/zahrada_common/ZahradaNode.h`, ze kterého vychází světlo (`examples/zahrada_light`) i radar. Pořád jsou to dva samostatné firmwary: světlo umí jen `LON`/`LOFF`/`STATUS` a spíná D6. Po změně společného souboru je potřeba projít testy obou (`./zahrada_test/run.sh` a `./radar_test/run.sh`, v Actions běží automaticky).
 
 ## Nastavení nového uzlu (USB konzole)
-Stejně jako světlo: `ver`, `get radio`, `set name dum-radar`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `SVETLO TEST`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.
+Stejně jako světlo: `ver`, `get radio`, `set name dum-radar`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `SVETLO RADAR`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.
 
 Heslo ani klíč kanálu nepatří do kódu (repozitář je veřejný).
 

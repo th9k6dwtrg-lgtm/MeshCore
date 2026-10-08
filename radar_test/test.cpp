@@ -214,7 +214,7 @@ int main() {
   g_millis = 312000; m.radarLoop(true); lightTimerLoop(); m.radarLoop(false);   // dalsi pohyb obnovi odpocet
   g_millis = 314500; lightTimerLoop(); CHECK(board.light_state == 1, "dalsi pohyb prodlouzi svit");
   g_millis = 315000; lightTimerLoop(); CHECK(board.light_state == 0, "pak zhasne");
-  CHECK(cli(m, 0, "svetlo test") == "SVETLO TEST 3s" && board.light_state == 1, "SVETLO TEST");
+  CHECK(cli(m, 0, "svetlo radar") == "SVETLO RADAR 3s" && board.light_state == 1, "SVETLO RADAR");
   cli(m, 0, "svetlo off");
   CHECK(board.light_state == 0, "SVETLO OFF hned zhasne");
 
@@ -251,13 +251,14 @@ int main() {
   CHECK(g_sent.size() == 5, "STATUS all");
   chanMsg(m, T + 6, "Jirka: SVETLO ON");
   CHECK(g_sent.size() == 6 && g_sent[5].text == "dum-radar: SVETLO ON", "kanal SVETLO ON");
-  chanMsg(m, T + 7, "Jirka: svetlo test");
-  CHECK(board.light_state == 1, "kanal SVETLO TEST");
+  chanMsg(m, T + 7, "Jirka: svetlo radar");
+  CHECK(board.light_state == 1, "kanal SVETLO RADAR");
   board.setGpio(0);
   size_t before = g_sent.size();
   chanMsg(m, T + 8, "Jirka: LON");                  CHECK(g_sent.size() == before, "LON svetel radar ignoruje");
   chanMsg(m, T + 9, "Jirka: radar");                CHECK(g_sent.size() == before, "neuplny prikaz ignorovan");
   chanMsg(m, T + 10, "Jirka: radar test");          CHECK(g_sent.size() == before, "RADAR TEST neexistuje");
+  chanMsg(m, T + 10, "Jirka: svetlo test");         CHECK(g_sent.size() == before && board.light_state == 0, "stary SVETLO TEST uz neexistuje");
   chanMsg(m, T + 11, "dum-radar: RADAR ON");        CHECK(g_sent.size() == before + 1, "(vlastni ozvena se do kanalu nevraci, ale kdyby ano, zpracuje se jako prikaz)");
   chanMsg(m, T + 12, "svetlo-1: OFF bat=3.80V rssi=-60 snr=9.5 up=0d01h00m"); CHECK(g_sent.size() == before + 1, "odpoved svetla ignorovana");
   chanMsg(m, T + 13, "Jirka: ahoj");                CHECK(g_sent.size() == before + 1, "bezna zprava ignorovana");
@@ -274,6 +275,10 @@ int main() {
   chanMsg(m, T + 19, "Jirka: STATUS");              CHECK(g_sent.back().delay == REPLY_ALL_DELAY_MS, "STATUS pro vsechny: radar 1 hned po svetlech");
   strcpy(m.prefs.node_name, "dum-radar-9");
   chanMsg(m, T + 20, "Jirka: STATUS RADAR");        CHECK(g_sent.back().delay == 600, "radar 9 ve stejnem okne jako 1 (8 oken)");
+  strcpy(m.prefs.node_name, "dum-radar-2"); board.setGpio(0);
+  chanMsg(m, T + 21, "Jirka: SVETLO RADAR 1");      CHECK(board.light_state == 0, "SVETLO RADAR 1 neni pro radar 2");
+  chanMsg(m, T + 22, "Jirka: SVETLO RADAR 1 2");    CHECK(board.light_state == 1 && g_sent.back().text == "dum-radar-2: SVETLO RADAR 3s", "SVETLO RADAR 1 2 rozsviti radar 2");
+  board.setGpio(0);
   cli(m, 0, "radar on"); g_sent.clear(); g_millis += 100000; pulse(m);
   CHECK(g_sent.size() == 1 && g_sent[0].delay == 0, "poplach POHYB! bez rozestupu");
   cli(m, 0, "radar off");

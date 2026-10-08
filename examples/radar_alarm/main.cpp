@@ -40,7 +40,7 @@ static void lightTimerStart() {
   light_timer_armed = true;
 }
 
-// Hlida dobu svitu: plati pro pohyb, SVETLO TEST i pro oficialni 'io s 1'.
+// Hlida dobu svitu: plati pro pohyb, SVETLO RADAR i pro oficialni 'io s 1'.
 static void lightTimerLoop() {
   if ((board.getGpio() & 1) == 0) { light_timer_armed = false; return; }
   if (!light_timer_armed) lightTimerStart();     // rozsviceno jinak (napr. 'io s 1')
@@ -297,7 +297,7 @@ protected:
   // Radar. Prikazy (velikost pismen nehraje roli):
   //   RADAR ON / RADAR OFF    -> zapne / vypne hlidani (zpravy o pohybu)
   //   SVETLO ON / SVETLO OFF  -> zapne / vypne rozsviceni svetla na LIGHT_PULSE_SECS pri pohybu
-  //   SVETLO TEST             -> rozsviti svetlo na LIGHT_PULSE_SECS
+  //   SVETLO RADAR            -> hned rozsviti svetlo na LIGHT_PULSE_SECS (obdoba LON u zahradnich svetel)
   //   STATUS                  -> stav + napeti baterie + sila signalu posledniho paketu + doba behu
   //   WDTTEST / ALERTTEST     -> (jen USB) test watchdogu / zkusebni poplach do kanalu
   //
@@ -543,9 +543,9 @@ protected:
       strcpy(reply, "SVETLO OFF");
       return true;
     }
-    if (strcmp(cmd, "svetlo test") == 0) {
+    if (strcmp(cmd, "svetlo radar") == 0) {
       lightPulse();
-      sprintf(reply, "SVETLO TEST %ds", LIGHT_PULSE_SECS);
+      sprintf(reply, "SVETLO RADAR %ds", LIGHT_PULSE_SECS);
       return true;
     }
     if (strcmp(cmd, "status") == 0 || strcmp(cmd, "status radar") == 0) {
@@ -706,8 +706,8 @@ protected:
     } else if (strcmp(word, "radar") == 0 || strcmp(word, "svetlo") == 0) {
       char* sub = (strcmp(word, "radar") == 0) ? t : strtok_r(NULL, " ,", &save);
       if (sub == NULL) return;
-      if (strcmp(sub, "on") && strcmp(sub, "off") && strcmp(sub, "test")) return;
-      if (strcmp(word, "radar") == 0 && strcmp(sub, "test") == 0) return;
+      if (strcmp(sub, "on") && strcmp(sub, "off") && strcmp(sub, "radar")) return;
+      if (strcmp(word, "radar") == 0 && strcmp(sub, "radar") == 0) return;
       snprintf(action, sizeof(action), "%s %s", word, sub);
       t = strtok_r(NULL, " ,", &save);
     } else if (strcmp(word, "status") == 0) {
