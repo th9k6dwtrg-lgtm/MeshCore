@@ -116,6 +116,12 @@ int main() {
 
   // --- start uzlu s ulozenym RADAR ON + SVETLO ON a clovekem pred radarem ---
   {
+    MyMesh z(mb, mr, mc, rg, rc, mt);
+    z.radar_on = false; z.light_on = true;         // jako by byl ulozeny jiny stav
+    z.loadRadarState();
+    CHECK(z.radar_on && !z.light_on, "po zapnuti vzdy RADAR ON a SVETLO OFF");
+  }
+  {
     const uint32_t W = RADAR_STARTUP_MS;           // doba ustalovani (testy bezi pro 30 s i 300 s)
     MyMesh b(mb, mr, mc, rg, rc, mt);
     strcpy(b.prefs.node_name, "dum-radar");

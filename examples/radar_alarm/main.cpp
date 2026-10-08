@@ -308,7 +308,7 @@ protected:
   //       "RADAR ON", "SVETLO OFF" ...  -> vsechny radary; "RADAR ON 2" -> jen radar s cislem 2
   //     Radar odpovi do kanalu "<jmeno>: <stav>". Pri pohybu posle "<jmeno>: POHYB! ...".
   //  Klic kanalu (CHAN) a korekce baterie (BATKAL) jsou spolecne se svetly, viz ZahradaNode.h.
-  //  Stav RADAR/SVETLO ON/OFF se uklada do pameti uzlu a po restartu zustava.
+  //  Po kazdem zapnuti zacina s RADAR ON a SVETLO OFF (RADAR_BOOT_ON, SVETLO_BOOT_ON), prikaz plati do vypnuti.
 
   bool radar_on = false;          // hlidani zapnuto
   bool light_on = false;          // rozsviceni pri pohybu zapnuto
@@ -575,18 +575,26 @@ protected:
   #define RADAR_CFG_FILE   "/radar_cfg"
   #define WARMUP_MIN   10
   #define WARMUP_MAX   900
+#ifndef RADAR_BOOT_ON
+  #define RADAR_BOOT_ON   true    // stav po zapnuti: RADAR ON
+#endif
+#ifndef SVETLO_BOOT_ON
+  #define SVETLO_BOOT_ON  false   // stav po zapnuti: SVETLO OFF
+#endif
   #define PAUZA_MIN    10
   #define PAUZA_MAX    3600
 
 public:
   void loadRadarState() {
     loadNodeState();   // klic kanalu a BATKAL
+    // po kazdem zapnuti hlida a sviti vypnute, ulozeny stav RADAR/SVETLO ON/OFF se nepouziva
+    radar_on = RADAR_BOOT_ON;
+    light_on = SVETLO_BOOT_ON;
 #if defined(NRF52_PLATFORM)
     File c = InternalFS.open(RADAR_CFG_FILE, FILE_O_READ);
     if (c) {
       uint8_t b[6];
       int n = c.read(b, sizeof(b));
-      if (n >= 2) { radar_on = b[0] != 0; light_on = b[1] != 0; }
       if (n >= 6) {   // novejsi soubor: nastaveni z CLI
         uint16_t w = b[2] | (b[3] << 8), pz = b[4] | (b[5] << 8);
         if (w >= WARMUP_MIN && w <= WARMUP_MAX) startup_secs = w;
