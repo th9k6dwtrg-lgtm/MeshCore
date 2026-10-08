@@ -455,7 +455,7 @@ int main() {
     for (int i = 0; i < 3; i++) { board.mv = 3420; c.onSensorDataRead(); }
     CHECK(g_sent.empty(), "korekce BATKAL plati i pro hlidani baterie");
     for (int i = 0; i < 3; i++) { board.mv = 3400; c.onSensorDataRead(); }
-    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: baterie slaba 3.49 V" && g_sent[0].delay == 0, "slaba baterie s korekci");
+    CHECK(g_sent.size() == 1 && g_sent[0].text == "dum-radar-1: baterie slaba 3.49 V" && g_sent[0].delay == 600, "slaba baterie s korekci (radar 1, jako svetla)");
     board.mv = 3900;
     CHECK(cli(c, 0, "batkal off") == "batkal=1.000 bat=3.90V", "BATKAL OFF");
 

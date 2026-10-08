@@ -1,4 +1,5 @@
 #include "SensorMesh.h"
+#include "../zahrada_common/ZahradaNode.h"   // kanal, baterie, watchdog (spolecne se svetly)
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -47,36 +48,6 @@ static void lightTimerLoop() {
     board.setGpio(board.getGpio() & ~1u);        // automaticke zhasnuti
     light_timer_armed = false;
   }
-}
-
-// ---------- hlidaci obvod (watchdog) nRF52 ----------
-// Stejne jako u zahradnich svetel: kdyz hlavni smycka nebezi WDT_TIMEOUT_SECS, cip se restartuje.
-#ifndef WDT_TIMEOUT_SECS
-  #define WDT_TIMEOUT_SECS  120
-#endif
-#ifdef NRF52_PLATFORM
-static void wdtStart() {
-  if ((NRF_WDT->RUNSTATUS & 1) == 0) {     // jeste nebezi (po vypnuti napajeni / resetu pinem)
-    NRF_WDT->CONFIG = (WDT_CONFIG_HALT_Pause << WDT_CONFIG_HALT_Pos) | (WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos);
-    NRF_WDT->CRV = (uint32_t)WDT_TIMEOUT_SECS * 32768UL;
-    NRF_WDT->RREN = WDT_RREN_RR0_Msk;
-    NRF_WDT->TASKS_START = 1;
-  }
-  NRF_WDT->RR[0] = WDT_RR_RR_Reload;
-}
-static inline void wdtFeed() { NRF_WDT->RR[0] = WDT_RR_RR_Reload; }
-#else
-static void wdtStart() { }
-static inline void wdtFeed() { }
-#endif
-
-// ---------- doba behu od startu (64bit, nepretece po 49 dnech) ----------
-static uint64_t uptime_ms = 0;
-static uint32_t uptime_last = 0;
-static void uptimeLoop() {
-  uint32_t now = millis();
-  uptime_ms += (uint32_t)(now - uptime_last);
-  uptime_last = now;
 }
 
 // ---------- UART radaru LD2410S: kalibrace (automaticke prahy) a cteni prahu ----------
@@ -274,20 +245,10 @@ public:
 };
 #endif
 
-// ---------- upozorneni na slabou baterii ----------
-#ifndef BATT_LOW_MV
-  #define BATT_LOW_MV     3500   // "baterie slaba"
-#endif
-#ifndef BATT_CRIT_MV
-  #define BATT_CRIT_MV    3350   // "baterie kriticka" (pod 3,3 V uz uzel po restartu nenabehne)
-#endif
-#define BATT_HYST_MV       100   // zruseni upozorneni az po vzrustu o 0,1 V nad prah
-#define BATT_DEBOUNCE        3   // prah musi byt podkrocen 3x po sobe (mereni 1x za minutu)
-
-class MyMesh : public SensorMesh {
+class MyMesh : public ZahradaNode {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
-     : SensorMesh(board, radio, ms, rng, rtc, tables)
+     : ZahradaNode(board, radio, ms, rng, rtc, tables, "/radar_ch")
   {
   }
 
@@ -307,7 +268,7 @@ protected:
   //       "STATUS"        -> vsechny uzly v kanalu vcetne radaru
   //       "RADAR ON", "SVETLO OFF" ...  -> vsechny radary; "RADAR ON 2" -> jen radar s cislem 2
   //     Radar odpovi do kanalu "<jmeno>: <stav>". Pri pohybu posle "<jmeno>: POHYB! ...".
-  //  Klic kanalu se nastavi pres CLI:  CHAN <32 nebo 64 hex znaku>,  CHAN = stav,  CHAN OFF = smazat.
+  //  Klic kanalu (CHAN) a korekce baterie (BATKAL) jsou spolecne se svetly, viz ZahradaNode.h.
   //  Stav RADAR/SVETLO ON/OFF se uklada do pameti uzlu a po restartu zustava.
 
   bool radar_on = false;          // hlidani zapnuto
@@ -324,10 +285,9 @@ protected:
   uint32_t alarm_last = 0;        // millis() posledni zpravy o pohybu
   uint32_t alarm_pending = 0;     // pohyby od posledni odeslane zpravy
 
-  // nastaveni pres CLI (uklada se do /radar_cfg): ustalovani po startu, pauza mezi zpravami o pohybu, korekce ADC
+  // nastaveni pres CLI (uklada se do /radar_cfg): ustalovani po startu, pauza mezi zpravami o pohybu
   uint16_t startup_secs = RADAR_STARTUP_SECS;
   uint16_t cooldown_secs = ALARM_COOLDOWN_SECS;
-  uint16_t batkal = 1000;         // napeti baterie x batkal/1000 (BATKAL podle multimetru)
 
   // kalibrace (automaticke prahy radaru pres UART)
   enum { KAL_IDLE, KAL_WAIT, KAL_SCAN };
@@ -337,93 +297,6 @@ protected:
 #ifdef PIN_RADAR_UART_RX
   LD2410S ld;
 #endif
-
-  mesh::GroupChannel light_chan;
-  bool light_chan_ok = false;
-
-  // Ochrana proti prehrani v kanalu: od kazdeho odesilatele (jmeno v zasifrovane zprave) jen novejsi
-  // casove razitko. Zvlast pro kazdeho, aby nevadil rozdil hodin mezi telefony.
-  #define CHAN_MAX_SENDERS  16
-  struct ChanSender { uint32_t name_hash; uint32_t last_ts; };
-  ChanSender chan_senders[CHAN_MAX_SENDERS];
-  uint8_t chan_senders_n = 0, chan_senders_next = 0;
-
-  static uint32_t nameHash(const char* s, size_t n) {   // FNV-1a
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
-    return h;
-  }
-  bool chanReplayOk(uint32_t name_hash, uint32_t ts) {
-    for (int i = 0; i < chan_senders_n; i++) {
-      if (chan_senders[i].name_hash == name_hash) {
-        if (ts <= chan_senders[i].last_ts) return false;   // stejna nebo starsi zprava = prehrani
-        chan_senders[i].last_ts = ts;
-        return true;
-      }
-    }
-    int idx;   // novy odesilatel
-    if (chan_senders_n < CHAN_MAX_SENDERS) idx = chan_senders_n++;
-    else { idx = chan_senders_next; chan_senders_next = (chan_senders_next + 1) % CHAN_MAX_SENDERS; }
-    chan_senders[idx].name_hash = name_hash;
-    chan_senders[idx].last_ts = ts;
-    return true;
-  }
-
-  // Upozorneni na slabou baterii: 1 zprava do soukromeho kanalu (stejne jako u zahradnich svetel).
-  bool low_active = false, crit_active = false;
-  uint8_t low_cnt = 0, crit_cnt = 0;
-
-  void battLevel(bool& active, uint8_t cnt, uint32_t mv, uint32_t thr_mv, const char* what) {
-    bool now = cnt >= BATT_DEBOUNCE || (active && mv < thr_mv + BATT_HYST_MV);
-    if (now && !active) {
-      char body[48];
-      snprintf(body, sizeof(body), "baterie %s %.2f V", what, mv / 1000.0f);
-      active = sendChannelText(body, slotDelay());
-    } else {
-      active = now;
-    }
-  }
-
-  void onSensorDataRead() override {   // vola SensorMesh 1x za minutu
-#ifdef NRF52_POWER_MANAGEMENT
-    if (board.isExternalPowered()) { low_cnt = crit_cnt = 0; return; }   // na USB napeti baterie nevypovida
-#endif
-    uint32_t mv = battMilliVolts();
-
-    low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
-    crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
-
-    battLevel(low_active,  low_cnt,  mv, BATT_LOW_MV,  "slaba");
-    battLevel(crit_active, crit_cnt, mv, BATT_CRIT_MV, "KRITICKA");
-  }
-
-  int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
-    return 0;
-  }
-
-  // cislo radaru = cislice na konci jmena uzlu (napr. "dum-radar-2" -> 2), 0 = bez cisla
-  int nodeNumber() {
-    const char* name = getNodePrefs()->node_name;
-    int len = strlen(name), i = len;
-    while (i > 0 && isdigit((unsigned char)name[i - 1])) i--;
-    return (i < len) ? atoi(&name[i]) : 0;
-  }
-
-  // napeti baterie: prumer 4 mereni (jedno mereni ADC kolisa), s korekci BATKAL
-  uint32_t battRawMilliVolts() {
-    uint32_t mv = 0;
-    for (int i = 0; i < 4; i++) mv += board.getBattMilliVolts();
-    return mv / 4;
-  }
-  uint32_t battMilliVolts() { return battRawMilliVolts() * batkal / 1000; }
-  float battVolts() { return battMilliVolts() / 1000.0f; }
-
-  // rozestup zprav podle cisla radaru (stejne jako zahradni svetla): radar 1 hned, 2 o 1,5 s pozdeji ...,
-  // radar bez cisla jako 5., at se odpovedi a hlaseni vice radaru v kanalu nesrazi
-  uint32_t slotDelay() {
-    int me = nodeNumber();
-    return (uint32_t)((me > 0 ? me - 1 : 4) % 8) * 1500UL;
-  }
 
   void lightPulse() {
     lightTimerStart();                  // (znovu) spustit odpocet
@@ -637,45 +510,26 @@ protected:
     return false;
   }
 
-  // ---------- ulozeni stavu a klice kanalu v pameti uzlu ----------
+  // ---------- ulozeni stavu v pameti uzlu ----------
   #define RADAR_CFG_FILE   "/radar_cfg"
   #define WARMUP_MIN   10
   #define WARMUP_MAX   900
   #define PAUZA_MIN    10
   #define PAUZA_MAX    3600
-  #define BATKAL_MIN   800    // korekce ADC 0,800 az 1,250
-  #define BATKAL_MAX   1250
-  #define RADAR_CHAN_FILE  "/radar_ch"
-
-  void applyChannelSecret(const uint8_t* secret32) {
-    static const uint8_t zeroes[16] = {0};
-    memcpy(light_chan.secret, secret32, PUB_KEY_SIZE);
-    // stejne jako aplikace/companion: 128bit klic (druha polovina nulova) nebo 256bit klic
-    int klen = (memcmp(&secret32[16], zeroes, 16) == 0) ? 16 : 32;
-    mesh::Utils::sha256(light_chan.hash, sizeof(light_chan.hash), light_chan.secret, klen);
-    light_chan_ok = true;
-    chan_senders_n = chan_senders_next = 0;
-  }
 
 public:
   void loadRadarState() {
+    loadNodeState();   // klic kanalu a BATKAL
 #if defined(NRF52_PLATFORM)
-    File f = InternalFS.open(RADAR_CHAN_FILE, FILE_O_READ);
-    if (f) {
-      uint8_t buf[PUB_KEY_SIZE];
-      if (f.read(buf, sizeof(buf)) == (int)sizeof(buf)) applyChannelSecret(buf);
-      f.close();
-    }
     File c = InternalFS.open(RADAR_CFG_FILE, FILE_O_READ);
     if (c) {
-      uint8_t b[8];
+      uint8_t b[6];
       int n = c.read(b, sizeof(b));
       if (n >= 2) { radar_on = b[0] != 0; light_on = b[1] != 0; }
-      if (n >= 8) {   // novejsi soubor: nastaveni z CLI
-        uint16_t w = b[2] | (b[3] << 8), pz = b[4] | (b[5] << 8), k = b[6] | (b[7] << 8);
+      if (n >= 6) {   // novejsi soubor: nastaveni z CLI
+        uint16_t w = b[2] | (b[3] << 8), pz = b[4] | (b[5] << 8);
         if (w >= WARMUP_MIN && w <= WARMUP_MAX) startup_secs = w;
         if (pz >= PAUZA_MIN && pz <= PAUZA_MAX) cooldown_secs = pz;
-        if (k >= BATKAL_MIN && k <= BATKAL_MAX) batkal = k;
       }
       c.close();
     }
@@ -688,35 +542,19 @@ protected:
     InternalFS.remove(RADAR_CFG_FILE);
     File f = InternalFS.open(RADAR_CFG_FILE, FILE_O_WRITE);
     if (f) {
-      uint8_t b[8] = { (uint8_t)(radar_on ? 1 : 0), (uint8_t)(light_on ? 1 : 0),
+      uint8_t b[6] = { (uint8_t)(radar_on ? 1 : 0), (uint8_t)(light_on ? 1 : 0),
                        (uint8_t)(startup_secs & 0xFF), (uint8_t)(startup_secs >> 8),
-                       (uint8_t)(cooldown_secs & 0xFF), (uint8_t)(cooldown_secs >> 8),
-                       (uint8_t)(batkal & 0xFF), (uint8_t)(batkal >> 8) };
+                       (uint8_t)(cooldown_secs & 0xFF), (uint8_t)(cooldown_secs >> 8) };
       f.write(b, sizeof(b));
       f.close();
     }
 #endif
   }
 
-  bool saveRadarChannel(const uint8_t* secret32) {
-#if defined(NRF52_PLATFORM)
-    InternalFS.remove(RADAR_CHAN_FILE);
-    if (secret32 == NULL) return true;
-    File f = InternalFS.open(RADAR_CHAN_FILE, FILE_O_WRITE);
-    if (!f) return false;
-    bool ok = f.write(secret32, PUB_KEY_SIZE) == PUB_KEY_SIZE;
-    f.close();
-    return ok;
-#else
-    return false;
-#endif
-  }
-
   // ---------- nastaveni jen pres CLI (USB nebo prihlaseny admin), kazdy radar zvlast ----------
   //   WARMUP [s]       ustalovani radaru po startu (10-900 s), bez cisla = zobrazit
   //   PAUZA [s]        nejkratsi odstup zprav o pohybu (10-3600 s)
-  //   BATKAL [V|OFF]   korekce mereni baterie: zadat napeti namerene multimetrem, OFF = bez korekce
-  //   NASTAVENI        vse najednou
+  //   NASTAVENI        vse najednou (vcetne BATKAL, ktery je spolecny se svetly)
   bool execSettings(const char* cmd, char* reply) {
     if (strcmp(cmd, "nastaveni") == 0) {
       sprintf(reply, "warmup=%us pauza=%us batkal=%u.%03u bat=%.2fV", startup_secs, cooldown_secs,
@@ -741,45 +579,13 @@ protected:
       sprintf(reply, "OK pauza=%us", cooldown_secs);
       return true;
     }
-    if (strcmp(cmd, "batkal") == 0 || strcmp(cmd, "batkal off") == 0 || strncmp(cmd, "batkal ", 7) == 0) {
-      if (strcmp(cmd, "batkal off") == 0) {
-        batkal = 1000;
-        saveRadarConfig();
-      } else if (cmd[6] == ' ') {
-        char num[12];                // napeti z multimetru, napr. 4.12 (carka i tecka)
-        strncpy(num, &cmd[7], sizeof(num) - 1);
-        num[sizeof(num) - 1] = 0;
-        char* comma = strchr(num, ',');
-        if (comma) *comma = '.';
-        float v = atof(num);
-        uint32_t raw = battRawMilliVolts();
-        uint32_t k = raw > 0 ? (uint32_t)(v * 1000.0f * 1000.0f / raw + 0.5f) : 0;
-        if (v < 2.5f || v > 4.5f || k < BATKAL_MIN || k > BATKAL_MAX) {
-          sprintf(reply, "Err - BATKAL 2.5 az 4.5 V a nejvys o 20 %% od mereni (%.2fV)", raw / 1000.0f);
-          return true;
-        }
-        batkal = k;
-        saveRadarConfig();
-      }
-      sprintf(reply, "batkal=%u.%03u bat=%.2fV", batkal / 1000, batkal % 1000, battVolts());
-      return true;
-    }
     return false;
   }
 
   // ---------- CLI: USB nebo LoRa od prihlaseneho admina ----------
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
     char cmd[80];
-    int n = 0;
-    while (command[n] && n < (int)sizeof(cmd) - 1) {
-      cmd[n] = tolower((unsigned char)command[n]);
-      n++;
-    }
-    cmd[n] = 0;
-    while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\r' || cmd[n - 1] == '\n')) cmd[--n] = 0;
-
-    // hodiny uzlu po startu nejdou spravne -> srovnat podle prikazu od admina (jen dopredu)
-    if (sender_timestamp > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(sender_timestamp);
+    cliPrepare(sender_timestamp, command, cmd, sizeof(cmd));
 
     if (execRadar(cmd, reply)) return true;
     if (execSettings(cmd, reply)) return true;
@@ -792,75 +598,15 @@ protected:
       return true;
     }
 
-    // test hlidaciho obvodu: zamerne zasekne firmware, do WDT_TIMEOUT_SECS se uzel sam restartuje (jen USB)
-    if (sender_timestamp == 0 && strcmp(cmd, "wdttest") == 0) {
-      board.setGpio(0);
-      Serial.println("  -> WDT test: firmware zaseknut, cekam na restart...");
-      Serial.flush();
-      while (1) { }
-    }
-
-    if (strcmp(cmd, "chan") == 0) {
-      if (light_chan_ok) sprintf(reply, "chan ON hash=%02X", light_chan.hash[0]);
-      else strcpy(reply, "chan OFF");
-      return true;
-    }
-    if (strcmp(cmd, "chan off") == 0) {
-      light_chan_ok = false;
-      saveRadarChannel(NULL);
-      strcpy(reply, "OK chan OFF");
-      return true;
-    }
-    if (memcmp(cmd, "chan ", 5) == 0) {
-      const char* hex = &cmd[5];
-      uint8_t secret[PUB_KEY_SIZE];
-      memset(secret, 0, sizeof(secret));
-      int hl = strlen(hex);
-      if ((hl == 32 && mesh::Utils::fromHex(secret, 16, hex)) ||
-          (hl == 64 && mesh::Utils::fromHex(secret, 32, hex))) {
-        applyChannelSecret(secret);
-        bool saved = saveRadarChannel(secret);
-        sprintf(reply, "OK chan ON hash=%02X%s", light_chan.hash[0], saved ? "" : " (NEULOZENO!)");
-      } else {
-        strcpy(reply, "Err - klic musi mit 32 nebo 64 hex znaku");
-      }
-      return true;
-    }
+    if (execCommon(sender_timestamp, cmd, reply)) return true;   // CHAN, BATKAL, WDTTEST
     return false;  // ostatni prikazy zpracuje standardni CLI MeshCore
   }
 
   // ---------- soukromy kanal ----------
-  int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[], int max_matches) override {
-    if (light_chan_ok && max_matches > 0 && memcmp(hash, light_chan.hash, sizeof(light_chan.hash)) == 0) {
-      channels[0] = light_chan;
-      return 1;
-    }
-    return 0;
-  }
-
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
-    if (type != PAYLOAD_TYPE_GRP_TXT || len < 6 || len > 5 + 120) return;
-    if ((data[4] >> 2) != 0) return;            // jen obycejny text (TXT_TYPE_PLAIN)
-
-    uint32_t ts;
-    memcpy(&ts, data, 4);
-
-    // hodiny uzlu srovnat podle kazde overene zpravy v kanalu (jen dopredu)
-    if (ts > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(ts);
-
-    // text zpravy ve tvaru "<odesilatel>: <text>" -> vzit cast za ": ", prevest na mala pismena
-    char text[128];
-    size_t tl = len - 5;
-    memcpy(text, &data[5], tl);
-    text[tl] = 0;
-    const char* sep = strstr(text, ": ");
-    size_t sender_len = sep ? (size_t)(sep - text) : 0;
-    const char* body = sep ? sep + 2 : text;
     char cmd[64];
-    int n = 0;
-    while (body[n] && n < (int)sizeof(cmd) - 1) { cmd[n] = tolower((unsigned char)body[n]); n++; }
-    cmd[n] = 0;
-    while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\r' || cmd[n - 1] == '\n')) cmd[--n] = 0;
+    uint32_t ts, sender;
+    if (!chanCommand(type, data, len, cmd, sizeof(cmd), ts, sender)) return;
 
     // "radar on 2" -> prikaz "radar on", cile "2";  "status radar" -> prikaz "status", cil "radar"
     char* save = NULL;
@@ -907,31 +653,15 @@ protected:
     if (!for_me) return;
 
     // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
-    if (!chanReplayOk(nameHash(text, sender_len), ts)) return;
+    if (!chanReplayOk(sender, ts)) return;
 
     char result[160];
     if (!execRadar(action, result)) return;
 
-    // prikaz pro vsechny uzly -> odpovedet az po zahradnich svetlech, at se zpravy nesrazi
-    // rozestup podle cisla radaru; prikaz pro vsechny uzly -> az po zahradnich svetlech
-    sendChannelText(result, (for_all && strcmp(action, "status") == 0 ? REPLY_ALL_DELAY_MS : 600) + slotDelay());
+    // rozestup podle cisla radaru; prikaz pro vsechny uzly -> az po zahradnich svetlech, at se zpravy nesrazi
+    sendChannelText(result, (for_all && strcmp(action, "status") == 0 ? REPLY_ALL_DELAY_MS : REPLY_BASE_MS) + slotDelay());
   }
 
-  // zprava do soukromeho kanalu ve tvaru "<jmeno>: <text>" (stejny format jako zprava z aplikace)
-  bool sendChannelText(const char* text, uint32_t delay_ms) {
-    if (!light_chan_ok) return false;
-    uint8_t out[5 + 140];
-    uint32_t now = getRTCClock()->getCurrentTimeUnique();
-    memcpy(out, &now, 4);
-    out[4] = 0;   // TXT_TYPE_PLAIN
-    int ol = snprintf((char*)&out[5], sizeof(out) - 5, "%s: %s", getNodePrefs()->node_name, text);
-    if (ol < 0) return false;
-    if (ol > (int)sizeof(out) - 6) ol = sizeof(out) - 6;
-    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, light_chan, out, 5 + ol);
-    if (!pkt) return false;
-    sendFlood(pkt, delay_ms + getRNG()->nextInt(0, 400), getNodePrefs()->path_hash_mode + 1);
-    return true;
-  }
   /* ======================================================================= */
 };
 
@@ -1008,7 +738,7 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
-  the_mesh.loadRadarState();   // klic kanalu a stav RADAR/SVETLO ON/OFF
+  the_mesh.loadRadarState();   // klic kanalu, BATKAL a stav RADAR/SVETLO ON/OFF
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);

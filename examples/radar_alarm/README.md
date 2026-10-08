@@ -61,7 +61,10 @@ Velikost písmen nevadí. V soukromém kanálu (stejný mechanismus a klíč jak
 | `BATKAL OFF` | bez korekce | `batkal=1.000 bat=…` |
 | `NASTAVENI` | vše najednou | `warmup=300s pauza=60s batkal=1.000 bat=3.95V` |
 
-Korekce `BATKAL` platí pro napětí ve zprávách, `STATUS` i hlídání slabé baterie (telemetrie v aplikaci zůstává bez korekce).
+Korekce `BATKAL` platí pro napětí ve zprávách, `STATUS` i hlídání slabé baterie (telemetrie v aplikaci zůstává bez korekce). `BATKAL` a `CHAN` umí stejně i zahradní světlo, ukládá se do `/batkal`.
+
+## Společný kód se světly
+Kanál (`CHAN`, ochrana proti přehrání, odesílání zpráv), hlídání baterie s `BATKAL`, rozestupy podle čísla uzlu, watchdog a doba běhu jsou v `examples/zahrada_common/ZahradaNode.h`, ze kterého vychází světlo (`examples/zahrada_light`) i radar. Pořád jsou to dva samostatné firmwary: světlo umí jen `LON`/`LOFF`/`STATUS` a spíná D6. Po změně společného souboru je potřeba projít testy obou (`./zahrada_test/run.sh` a `./radar_test/run.sh`, v Actions běží automaticky).
 
 ## Nastavení nového uzlu (USB konzole)
 Stejně jako světlo: `ver`, `get radio`, `set name dum-radar`, `password …`, `set path.hash.mode 1`, `get advert.interval` (případně `set advert.interval 0`), `chan <klíč>`, `advert.zerohop`. Pak `SVETLO TEST`, `RADAR ON`, projít před radarem a zkontrolovat zprávu v kanálu.

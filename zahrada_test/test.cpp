@@ -23,10 +23,10 @@ int main() {
   MyMesh m(mb, mr, mc, rg, rc, mt);
 
   // --- cislo svetla ---
-  strcpy(m.prefs.node_name, "svetlo-1");  CHECK(m.lightNumber() == 1, "svetlo-1 -> 1");
-  strcpy(m.prefs.node_name, "svetlo12");  CHECK(m.lightNumber() == 12, "svetlo12 -> 12");
-  strcpy(m.prefs.node_name, "svetlo-1-x");CHECK(m.lightNumber() == 0, "bez cisla na konci -> 0");
-  strcpy(m.prefs.node_name, "3");         CHECK(m.lightNumber() == 3, "3 -> 3");
+  strcpy(m.prefs.node_name, "svetlo-1");  CHECK(m.nodeNumber() == 1, "svetlo-1 -> 1");
+  strcpy(m.prefs.node_name, "svetlo12");  CHECK(m.nodeNumber() == 12, "svetlo12 -> 12");
+  strcpy(m.prefs.node_name, "svetlo-1-x");CHECK(m.nodeNumber() == 0, "bez cisla na konci -> 0");
+  strcpy(m.prefs.node_name, "3");         CHECK(m.nodeNumber() == 3, "3 -> 3");
   strcpy(m.prefs.node_name, "svetlo-1");
 
   // --- CLI ---
@@ -180,6 +180,14 @@ int main() {
   uptime_ms = 0; uptime_last = 0;
   g_millis = 0; uptimeLoop(); g_millis = (uint32_t)((2*1440 + 3*60 + 4) * 60000UL); uptimeLoop();
   CHECK(cli(m, 0, "status").find("up=2d03h04m") != std::string::npos, "up format");
+
+  // --- BATKAL (spolecne s radarem) ---
+  board.mv = 3900;
+  CHECK(cli(m, 0, "batkal") == "batkal=1.000 bat=3.90V", "BATKAL vychozi");
+  CHECK(cli(m, 0, "BATKAL 4,00") == "batkal=1.026 bat=4.00V", "BATKAL podle multimetru");
+  CHECK(cli(m, 0, "status").find("bat=4.00V") != std::string::npos, "STATUS s korekci");
+  CHECK(cli(m, 0, "batkal 3.0").rfind("Err - BATKAL", 0) == 0, "BATKAL o vic nez 20 % odmitnut");
+  CHECK(cli(m, 1800300000, "batkal off") == "batkal=1.000 bat=3.90V", "BATKAL OFF i na dalku (admin)");
 
   printf("%d kontrol, %d chyb\n", checks, fails);
   return fails ? 1 : 0;

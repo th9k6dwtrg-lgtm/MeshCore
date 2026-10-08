@@ -1,4 +1,5 @@
 #include "SensorMesh.h"
+#include "../zahrada_common/ZahradaNode.h"   // kanal, baterie, watchdog (spolecne s radarem)
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -28,53 +29,10 @@ static void lightTimerLoop() {
   }
 }
 
-// ---------- hlidaci obvod (watchdog) nRF52 ----------
-// Kdyz se firmware zasekne a hlavni smycka ho neobnovi do WDT_TIMEOUT_SECS, cip se sam restartuje.
-// Po restartu je svetlo vzdy zhasnute (D6 = LOW hned po startu).
-// Pozn.: jednou spusteny WDT nejde zastavit a bezi i po softwarovem resetu (napr. do zavadece).
-// Zavadec Adafruit ho neobnovuje, proto dlouha doba (prijde-li reset v zavadeci, staci zopakovat).
-#ifndef WDT_TIMEOUT_SECS
-  #define WDT_TIMEOUT_SECS  120
-#endif
-#ifdef NRF52_PLATFORM
-static void wdtStart() {
-  if ((NRF_WDT->RUNSTATUS & 1) == 0) {     // jeste nebezi (po vypnuti napajeni / resetu pinem)
-    NRF_WDT->CONFIG = (WDT_CONFIG_HALT_Pause << WDT_CONFIG_HALT_Pos) | (WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos);
-    NRF_WDT->CRV = (uint32_t)WDT_TIMEOUT_SECS * 32768UL;
-    NRF_WDT->RREN = WDT_RREN_RR0_Msk;
-    NRF_WDT->TASKS_START = 1;
-  }
-  NRF_WDT->RR[0] = WDT_RR_RR_Reload;
-}
-static inline void wdtFeed() { NRF_WDT->RR[0] = WDT_RR_RR_Reload; }
-#else
-static void wdtStart() { }
-static inline void wdtFeed() { }
-#endif
-
-// ---------- doba behu od startu (64bit, nepretece po 49 dnech) ----------
-static uint64_t uptime_ms = 0;
-static uint32_t uptime_last = 0;
-static void uptimeLoop() {
-  uint32_t now = millis();
-  uptime_ms += (uint32_t)(now - uptime_last);
-  uptime_last = now;
-}
-
-// ---------- upozorneni na slabou baterii ----------
-#ifndef BATT_LOW_MV
-  #define BATT_LOW_MV     3500   // "baterie slaba"
-#endif
-#ifndef BATT_CRIT_MV
-  #define BATT_CRIT_MV    3350   // "baterie kriticka" (pod 3,3 V uz uzel po restartu nenabehne)
-#endif
-#define BATT_HYST_MV       100   // zruseni upozorneni az po vzrustu o 0,1 V nad prah
-#define BATT_DEBOUNCE        3   // prah musi byt podkrocen 3x po sobe (mereni 1x za minutu)
-
-class MyMesh : public SensorMesh {
+class MyMesh : public ZahradaNode {
 public:
   MyMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::MillisecondClock& ms, mesh::RNG& rng, mesh::RTCClock& rtc, mesh::MeshTables& tables)
-     : SensorMesh(board, radio, ms, rng, rtc, tables)
+     : ZahradaNode(board, radio, ms, rng, rtc, tables, "/zahrada_ch")
   {
   }
 
@@ -86,6 +44,7 @@ protected:
   //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
   //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
   //   ALERTTEST -> (jen USB) posle zkusebni upozorneni do kanalu
+  //   CHAN, BATKAL -> klic kanalu a korekce baterie (spolecne s radarem, viz ZahradaNode.h)
   //
   // Dve cesty, jak prikaz poslat:
   //  1) CLI (USB, nebo LoRa od prihlaseneho admina) - jen tomuto uzlu.
@@ -93,84 +52,7 @@ protected:
   //       "LON"      -> vsechna svetla
   //       "LON 2"    -> jen svetlo s cislem 2 (cislo = cislice na konci jmena uzlu)
   //       "LON 1 3"  -> svetla 1 a 3
-  //     Kazdy uzel odpovi do kanalu "<jmeno>: <stav>".
-  //  Klic kanalu se nastavi pres CLI:  CHAN <32 nebo 64 hex znaku>,  CHAN = stav,  CHAN OFF = smazat.
-
-  mesh::GroupChannel light_chan;
-  bool light_chan_ok = false;
-
-  // Ochrana proti prehrani v kanalu: od kazdeho odesilatele (jmeno v zasifrovane zprave) jen novejsi
-  // casove razitko. Zvlast pro kazdeho, aby nevadil rozdil hodin mezi telefony (napr. 2 lide v kanalu).
-  #define CHAN_MAX_SENDERS  16   // az 16 ruznych lidi (jmen) v kanalu
-  struct ChanSender { uint32_t name_hash; uint32_t last_ts; };
-  ChanSender chan_senders[CHAN_MAX_SENDERS];
-  uint8_t chan_senders_n = 0, chan_senders_next = 0;
-
-  static uint32_t nameHash(const char* s, size_t n) {   // FNV-1a
-    uint32_t h = 2166136261u;
-    for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
-    return h;
-  }
-  bool chanReplayOk(uint32_t name_hash, uint32_t ts) {
-    for (int i = 0; i < chan_senders_n; i++) {
-      if (chan_senders[i].name_hash == name_hash) {
-        if (ts <= chan_senders[i].last_ts) return false;   // stejna nebo starsi zprava = prehrani
-        chan_senders[i].last_ts = ts;
-        return true;
-      }
-    }
-    int idx;   // novy odesilatel
-    if (chan_senders_n < CHAN_MAX_SENDERS) idx = chan_senders_n++;
-    else { idx = chan_senders_next; chan_senders_next = (chan_senders_next + 1) % CHAN_MAX_SENDERS; }
-    chan_senders[idx].name_hash = name_hash;
-    chan_senders[idx].last_ts = ts;
-    return true;
-  }
-
-  // Upozorneni na slabou baterii: 1 zprava do soukromeho kanalu (vidi vsichni clenove kanalu).
-  // (Prime zpravy adminum aplikace u kontaktu typu Sensor nezobrazuje, proto se nepouzivaji.)
-  // Jedna zprava pri prekroceni prahu, dalsi az po nabiti nad prah + 0,1 V a novem poklesu.
-  bool low_active = false, crit_active = false;
-  uint8_t low_cnt = 0, crit_cnt = 0;
-
-  // vyhodnoceni jednoho prahu; zprava se odesle pri vzniku (kdyz se nepodari, zkusi se za minutu znovu)
-  void battLevel(bool& active, uint8_t cnt, uint32_t mv, uint32_t thr_mv, const char* what) {
-    bool now = cnt >= BATT_DEBOUNCE || (active && mv < thr_mv + BATT_HYST_MV);
-    if (now && !active) {
-      char body[48];
-      snprintf(body, sizeof(body), "baterie %s %.2f V", what, mv / 1000.0f);
-      active = sendChannelText(body);
-    } else {
-      active = now;
-    }
-  }
-
-  void onSensorDataRead() override {   // vola SensorMesh 1x za minutu
-#ifdef NRF52_POWER_MANAGEMENT
-    if (board.isExternalPowered()) { low_cnt = crit_cnt = 0; return; }   // na USB napeti baterie nevypovida
-#endif
-    uint32_t mv = 0;
-    for (int i = 0; i < 4; i++) mv += board.getBattMilliVolts();
-    mv /= 4;
-
-    low_cnt  = (mv < BATT_LOW_MV)  ? (low_cnt  < 255 ? low_cnt  + 1 : 255) : 0;
-    crit_cnt = (mv < BATT_CRIT_MV) ? (crit_cnt < 255 ? crit_cnt + 1 : 255) : 0;
-
-    battLevel(low_active,  low_cnt,  mv, BATT_LOW_MV,  "slaba");
-    battLevel(crit_active, crit_cnt, mv, BATT_CRIT_MV, "KRITICKA");
-  }
-
-  int querySeriesData(uint32_t start_secs_ago, uint32_t end_secs_ago, MinMaxAvg dest[], int max_num) override {
-    return 0;
-  }
-
-  // cislo svetla = cislice na konci jmena uzlu (napr. "zahrada-svetlo-2" -> 2), 0 = bez cisla
-  int lightNumber() {
-    const char* name = getNodePrefs()->node_name;
-    int len = strlen(name), i = len;
-    while (i > 0 && isdigit((unsigned char)name[i - 1])) i--;
-    return (i < len) ? atoi(&name[i]) : 0;
-  }
+  //     Kazdy uzel odpovi do kanalu "<jmeno>: <stav>", s rozestupem podle sveho cisla.
 
   // provede LON / LOFF / STATUS; cmd uz je malymi pismeny a bez parametru
   bool execLight(const char* cmd, char* reply) {
@@ -197,7 +79,7 @@ protected:
       uint32_t up_min = (uint32_t)(uptime_ms / 60000ULL);
       sprintf(reply, "%s bat=%.2fV rssi=%d snr=%.1f up=%ud%02uh%02um",
               state,
-              board.getBattMilliVolts() / 1000.0f,
+              battVolts(),
               (int)radio_driver.getLastRSSI(),
               radio_driver.getLastSNR(),
               (unsigned)(up_min / 1440), (unsigned)((up_min / 60) % 24), (unsigned)(up_min % 60));
@@ -206,142 +88,30 @@ protected:
     return false;
   }
 
-  // ---------- klic soukromeho kanalu: ulozeni v pameti uzlu ----------
-  #define LIGHT_CHAN_FILE  "/zahrada_ch"
-
-  void applyChannelSecret(const uint8_t* secret32) {
-    static const uint8_t zeroes[16] = {0};
-    memcpy(light_chan.secret, secret32, PUB_KEY_SIZE);
-    // stejne jako aplikace/companion: 128bit klic (druha polovina nulova) nebo 256bit klic
-    int klen = (memcmp(&secret32[16], zeroes, 16) == 0) ? 16 : 32;
-    mesh::Utils::sha256(light_chan.hash, sizeof(light_chan.hash), light_chan.secret, klen);
-    light_chan_ok = true;
-    chan_senders_n = chan_senders_next = 0;
-  }
-
-public:
-  void loadLightChannel() {
-#if defined(NRF52_PLATFORM)
-    File f = InternalFS.open(LIGHT_CHAN_FILE, FILE_O_READ);
-    if (f) {
-      uint8_t buf[PUB_KEY_SIZE];
-      if (f.read(buf, sizeof(buf)) == (int)sizeof(buf)) applyChannelSecret(buf);
-      f.close();
-    }
-#endif
-  }
-
-protected:
-  bool saveLightChannel(const uint8_t* secret32) {
-#if defined(NRF52_PLATFORM)
-    InternalFS.remove(LIGHT_CHAN_FILE);
-    if (secret32 == NULL) return true;
-    File f = InternalFS.open(LIGHT_CHAN_FILE, FILE_O_WRITE);
-    if (!f) return false;
-    bool ok = f.write(secret32, PUB_KEY_SIZE) == PUB_KEY_SIZE;
-    f.close();
-    return ok;
-#else
-    return false;
-#endif
-  }
-
   // ---------- CLI: USB nebo LoRa od prihlaseneho admina ----------
   bool handleCustomCommand(uint32_t sender_timestamp, char* command, char* reply) override {
-    // prevod na mala pismena a oriznuti mezer na konci (do pomocneho bufferu)
     char cmd[80];
-    int n = 0;
-    while (command[n] && n < (int)sizeof(cmd) - 1) {
-      cmd[n] = tolower((unsigned char)command[n]);
-      n++;
-    }
-    cmd[n] = 0;
-    while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\r' || cmd[n - 1] == '\n')) cmd[--n] = 0;
-
-    // hodiny uzlu po startu nejdou spravne -> srovnat podle prikazu od admina (jen dopredu)
-    if (sender_timestamp > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(sender_timestamp);
+    cliPrepare(sender_timestamp, command, cmd, sizeof(cmd));
 
     if (execLight(cmd, reply)) return true;
 
     // test upozorneni: posle zkusebni zpravu do kanalu stejnou cestou jako slaba baterie (jen pres USB)
     if (sender_timestamp == 0 && strcmp(cmd, "alerttest") == 0) {
       char body[48];
-      snprintf(body, sizeof(body), "test upozorneni, bat %.2f V", board.getBattMilliVolts() / 1000.0f);
-      strcpy(reply, sendChannelText(body) ? "OK - test upozorneni odeslan do kanalu" : "Err - kanal neni nastaven");
+      snprintf(body, sizeof(body), "test upozorneni, bat %.2f V", battVolts());
+      strcpy(reply, sendChannelText(body, REPLY_BASE_MS + slotDelay()) ? "OK - test upozorneni odeslan do kanalu" : "Err - kanal neni nastaven");
       return true;
     }
 
-    // test hlidaciho obvodu: zamerne zasekne firmware, do WDT_TIMEOUT_SECS se uzel sam restartuje
-    // (jen pres USB, ne na dalku)
-    if (sender_timestamp == 0 && strcmp(cmd, "wdttest") == 0) {
-      board.setGpio(0);
-      Serial.println("  -> WDT test: firmware zaseknut, cekam na restart...");
-      Serial.flush();
-      while (1) { }
-    }
-
-    if (strcmp(cmd, "chan") == 0) {
-      if (light_chan_ok) sprintf(reply, "chan ON hash=%02X", light_chan.hash[0]);
-      else strcpy(reply, "chan OFF");
-      return true;
-    }
-    if (strcmp(cmd, "chan off") == 0) {
-      light_chan_ok = false;
-      saveLightChannel(NULL);
-      strcpy(reply, "OK chan OFF");
-      return true;
-    }
-    if (memcmp(cmd, "chan ", 5) == 0) {
-      const char* hex = &cmd[5];
-      uint8_t secret[PUB_KEY_SIZE];
-      memset(secret, 0, sizeof(secret));
-      int hl = strlen(hex);
-      if ((hl == 32 && mesh::Utils::fromHex(secret, 16, hex)) ||
-          (hl == 64 && mesh::Utils::fromHex(secret, 32, hex))) {
-        applyChannelSecret(secret);
-        bool saved = saveLightChannel(secret);
-        sprintf(reply, "OK chan ON hash=%02X%s", light_chan.hash[0], saved ? "" : " (NEULOZENO!)");
-      } else {
-        strcpy(reply, "Err - klic musi mit 32 nebo 64 hex znaku");
-      }
-      return true;
-    }
+    if (execCommon(sender_timestamp, cmd, reply)) return true;   // CHAN, BATKAL, WDTTEST
     return false;  // ostatni prikazy zpracuje standardni CLI MeshCore
   }
 
   // ---------- soukromy kanal ----------
-  int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[], int max_matches) override {
-    if (light_chan_ok && max_matches > 0 && memcmp(hash, light_chan.hash, sizeof(light_chan.hash)) == 0) {
-      channels[0] = light_chan;
-      return 1;
-    }
-    return 0;
-  }
-
   void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override {
-    if (type != PAYLOAD_TYPE_GRP_TXT || len < 6 || len > 5 + 120) return;
-    if ((data[4] >> 2) != 0) return;            // jen obycejny text (TXT_TYPE_PLAIN)
-
-    uint32_t ts;
-    memcpy(&ts, data, 4);
-
-    // hodiny uzlu po startu nejdou spravne -> srovnat podle kazde overene zpravy v kanalu (jen dopredu),
-    // at maji upozorneni spravne datum co nejdriv po restartu
-    if (ts > getRTCClock()->getCurrentTime()) getRTCClock()->setCurrentTime(ts);
-
-    // text zpravy ve tvaru "<odesilatel>: <text>" -> vzit cast za ": ", prevest na mala pismena
-    char text[128];
-    size_t tl = len - 5;
-    memcpy(text, &data[5], tl);
-    text[tl] = 0;
-    const char* sep = strstr(text, ": ");
-    size_t sender_len = sep ? (size_t)(sep - text) : 0;
-    const char* body = sep ? sep + 2 : text;
     char cmd[64];
-    int n = 0;
-    while (body[n] && n < (int)sizeof(cmd) - 1) { cmd[n] = tolower((unsigned char)body[n]); n++; }
-    cmd[n] = 0;
-    while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\r' || cmd[n - 1] == '\n')) cmd[--n] = 0;
+    uint32_t ts, sender;
+    if (!chanCommand(type, data, len, cmd, sizeof(cmd), ts, sender)) return;
 
     // rozdelit: prvni slovo = prikaz, dalsi slova = cisla svetel (zadna = vsechna)
     char* save = NULL;
@@ -349,7 +119,7 @@ protected:
     if (word == NULL) return;
     if (strcmp(word, "lon") && strcmp(word, "loff") && strcmp(word, "status")) return;  // neni pro nas (napr. odpovedi ostatnich svetel)
 
-    int me = lightNumber();
+    int me = nodeNumber();
     bool for_me = true;
     char* t = strtok_r(NULL, " ,", &save);
     if (t != NULL) {
@@ -361,31 +131,13 @@ protected:
     if (!for_me) return;
 
     // ochrana proti prehrani (zvlast pro kazdeho odesilatele)
-    if (!chanReplayOk(nameHash(text, sender_len), ts)) return;
+    if (!chanReplayOk(sender, ts)) return;
 
     char result[96];
     if (!execLight(word, result)) return;
 
-    sendChannelText(result);
-  }
-
-  // zprava do soukromeho kanalu ve tvaru "<jmeno>: <text>" (stejny format jako zprava z aplikace);
-  // kazde svetlo se zpozdenim podle sveho cisla, at se zpravy vice svetel nesrazi
-  bool sendChannelText(const char* text) {
-    if (!light_chan_ok) return false;
-    uint8_t out[5 + 140];
-    uint32_t now = getRTCClock()->getCurrentTimeUnique();
-    memcpy(out, &now, 4);
-    out[4] = 0;   // TXT_TYPE_PLAIN
-    int ol = snprintf((char*)&out[5], sizeof(out) - 5, "%s: %s", getNodePrefs()->node_name, text);
-    if (ol < 0) return false;
-    if (ol > (int)sizeof(out) - 6) ol = sizeof(out) - 6;
-    auto pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, light_chan, out, 5 + ol);
-    if (!pkt) return false;
-    int me = lightNumber();
-    uint32_t delay = 600 + (uint32_t)((me > 0 ? me - 1 : 4) % 8) * 1500 + getRNG()->nextInt(0, 400);
-    sendFlood(pkt, delay, getNodePrefs()->path_hash_mode + 1);
-    return true;
+    // kazde svetlo se zpozdenim podle sveho cisla, at se zpravy vice svetel nesrazi
+    sendChannelText(result, REPLY_BASE_MS + slotDelay());
   }
   /* ======================================================================= */
 };
@@ -462,7 +214,7 @@ void setup() {
   sensors.begin();
 
   the_mesh.begin(fs);
-  the_mesh.loadLightChannel();   // klic soukromeho kanalu (pokud byl nastaven)
+  the_mesh.loadNodeState();   // klic soukromeho kanalu a BATKAL (pokud byly nastaveny)
 
 #ifdef DISPLAY_CLASS
   ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
