@@ -23,10 +23,10 @@ int main() {
   MyMesh m(mb, mr, mc, rg, rc, mt);
 
   // --- cislo svetla ---
-  strcpy(m.prefs.node_name, "svetlo-1");  CHECK(m.lightNumber() == 1, "svetlo-1 -> 1");
-  strcpy(m.prefs.node_name, "svetlo12");  CHECK(m.lightNumber() == 12, "svetlo12 -> 12");
-  strcpy(m.prefs.node_name, "svetlo-1-x");CHECK(m.lightNumber() == 0, "bez cisla na konci -> 0");
-  strcpy(m.prefs.node_name, "3");         CHECK(m.lightNumber() == 3, "3 -> 3");
+  strcpy(m.prefs.node_name, "svetlo-1");  CHECK(m.nodeNumber() == 1, "svetlo-1 -> 1");
+  strcpy(m.prefs.node_name, "svetlo12");  CHECK(m.nodeNumber() == 12, "svetlo12 -> 12");
+  strcpy(m.prefs.node_name, "svetlo-1-x");CHECK(m.nodeNumber() == 0, "bez cisla na konci -> 0");
+  strcpy(m.prefs.node_name, "3");         CHECK(m.nodeNumber() == 3, "3 -> 3");
   strcpy(m.prefs.node_name, "svetlo-1");
 
   // --- CLI ---
@@ -34,10 +34,10 @@ int main() {
   CHECK(cli(m, 0, "CHAN 00112233445566778899aabbccddeeff") .rfind("OK chan ON hash=", 0) == 0, "chan 32 hex");
   CHECK(cli(m, 0, "chan 0011") .rfind("Err", 0) == 0, "kratky klic odmitnut");
   CHECK(cli(m, 0, "chan") .rfind("chan ON", 0) == 0, "chan stav ON");
-  CHECK(cli(m, 0, "LON  ") == "ON 5s", "LON velkymi + mezery");
+  CHECK(cli(m, 0, "LON  ").rfind("ON 5s c.1 bat=", 0) == 0, "LON velkymi + mezery, poradove cislo a napeti");
   CHECK(board.light_state == 1, "LON rozsvitil");
-  CHECK(cli(m, 0, "loff") == "OFF", "loff");
-  CHECK(board.light_state == 0, "LOFF zhasl");
+  CHECK(cli(m, 0, "loff") == "<NEZPRACOVANO>", "LOFF uz neni (svetlo zhasne samo)");
+  board.setGpio(0);
   std::string st = cli(m, 0, "Status");
   CHECK(st.rfind("OFF bat=3.90V rssi=-61 snr=9.2", 0) == 0 || st.rfind("OFF bat=3.90V rssi=-61 snr=9.3", 0) == 0, "STATUS format");
   CHECK(st.find(" up=0d00h00m") != std::string::npos, "STATUS up");
@@ -70,9 +70,13 @@ int main() {
   g_sent.clear();
   uint32_t T = 1800001000;
   chanMsg(m, T, "Jirka: LON");             CHECK(board.light_state == 1, "kanal LON pro vsechny");
-  CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: ON 5s", "odpoved do kanalu");
+  CHECK(g_sent.size() == 1 && g_sent[0].text == "svetlo-1: ON 5s c." + std::to_string(m.light_seq) + " bat=3.90V", "odpoved do kanalu s cislem rozsviceni a napetim");
+  { uint32_t n = m.light_seq; cli(m, 0, "lon"); CHECK(m.light_seq == n + 1, "kazde LON zvysi poradove cislo o 1"); board.setGpio(0); }
   CHECK(g_sent[0].delay == 600, "zpozdeni svetla 1");
   CHECK(m.rtc.t >= T, "hodiny srovnany podle kanalu");
+  CHECK(m.chan_senders_dirty, "nove razitko odesilatele -> ulozit");
+  m.onSensorDataRead();
+  CHECK(!m.chan_senders_dirty, "razitka ulozena pri minutovem mereni (preziji restart)");
   board.setGpio(0);
   chanMsg(m, T, "Jirka: LON");             CHECK(board.light_state == 0, "prehrani stejne zpravy odmitnuto");
   chanMsg(m, T - 5, "Jirka: LON");         CHECK(board.light_state == 0, "starsi zprava stejneho odesilatele odmitnuta");
@@ -84,15 +88,39 @@ int main() {
   chanMsg(m, T + 12, "Jirka: lon 2,1");    CHECK(board.light_state == 1, "lon 2,1 (carka)");
   board.setGpio(0);
   chanMsg(m, T + 13, "Jirka: LON all");    CHECK(board.light_state == 1, "LON all");
-  chanMsg(m, T + 14, "Jirka: LOFF");       CHECK(board.light_state == 0, "LOFF v kanalu");
+  { size_t n0 = g_sent.size();
+    chanMsg(m, T + 14, "Jirka: LOFF");     CHECK(board.light_state == 1 && g_sent.size() == n0, "LOFF v kanalu uz neni prikaz"); }
+  board.setGpio(0);
   size_t before = g_sent.size();
   chanMsg(m, T + 15, "svetlo-2: ON 5s");   CHECK(g_sent.size() == before, "odpovedi jinych svetel ignorovany");
   chanMsg(m, T + 16, "svetlo-2: OFF bat=3.80V rssi=-60 snr=9.5 up=0d01h00m"); CHECK(g_sent.size() == before, "STATUS odpoved jineho svetla ignorovana");
   chanMsg(m, T + 17, "svetlo-2: baterie slaba 3.45 V"); CHECK(g_sent.size() == before, "upozorneni jineho svetla ignorovano");
   chanMsg(m, T + 18, "Jirka: ahoj");       CHECK(g_sent.size() == before, "bezna zprava ignorovana");
+  chanMsg(m, T + 18, "Petr: STATUS RADAR");  CHECK(g_sent.size() == before, "STATUS RADAR svetlo ignoruje");
+  chanMsg(m, T + 19, "Petr: STATUS RADAR 1"); CHECK(g_sent.size() == before, "STATUS RADAR 1 svetlo 1 ignoruje");
   chanMsg(m, T + 19, "Jirka: STATUS");     CHECK(g_sent.size() == before + 1 && g_sent.back().text.rfind("svetlo-1: OFF bat=", 0) == 0, "STATUS v kanalu");
   strcpy(m.prefs.node_name, "svetlo-4");
   chanMsg(m, T + 20, "Jirka: STATUS");     CHECK(g_sent.back().delay == 600 + 3*1500, "zpozdeni svetla 4");
+  // LIGHT PRIKAZY: tahak prikazu, bez cisla odpovi jen svetlo 1
+  before = g_sent.size();
+  chanMsg(m, T + 21, "Jirka: LIGHT PRIKAZY");   CHECK(g_sent.size() == before, "LIGHT PRIKAZY bez cisla: svetlo 4 mlci");
+  chanMsg(m, T + 22, "Jirka: light prikazy 4"); CHECK(g_sent.size() == before + 1 && g_sent.back().delay == 600 + 3*1500, "LIGHT PRIKAZY 4 posle svetlo 4");
+  strcpy(m.prefs.node_name, "LIGHT 1");
+  before = g_sent.size();
+  chanMsg(m, T + 23, "Jirka: Light Prikazy");
+  CHECK(g_sent.size() == before + 1 && g_sent.back().text ==
+        "LIGHT 1: prikazy:\nLON - svetlo na 5 s\nSTATUS - stav vsech uzlu\nLIGHT PRIKAZY - tento seznam\nLON 2 = jen svetlo 2",
+        "LIGHT PRIKAZY: jedna zprava, kazdy prikaz na svem radku");
+  CHECK(g_sent.back().text.size() <= 139 && g_sent.back().delay == 600, "tahak do 139 znaku, svetlo 1 hned");
+  chanMsg(m, T + 24, "Jirka: light příkazy");   CHECK(g_sent.size() == before + 2, "light příkazy s diakritikou");
+  chanMsg(m, T + 25, "Jirka: LIGHT PRIKAZY 2"); CHECK(g_sent.size() == before + 2, "LIGHT PRIKAZY 2 neni pro svetlo 1");
+  chanMsg(m, T + 26, "Jirka: LIGHT");           CHECK(g_sent.size() == before + 2, "samotne LIGHT nic");
+  chanMsg(m, T + 27, "Jirka: LIGHT ON");        CHECK(g_sent.size() == before + 2 && board.light_state == 0, "LIGHT ON neni prikaz");
+  chanMsg(m, T + 28, "RADAR 1: prikazy 1/4:\nRADAR ON - hlidat"); CHECK(g_sent.size() == before + 2, "tahak radaru svetlo ignoruje");
+  chanMsg(m, T + 29, "LIGHT 2: prikazy:\nLON - svetlo na 5 s"); CHECK(g_sent.size() == before + 2 && board.light_state == 0, "tahak jineho svetla ignorovan");
+  chanMsg(m, T + 30, "Jirka: RADAR PRIKAZY");   CHECK(g_sent.size() == before + 2, "RADAR PRIKAZY svetlo ignoruje");
+  strcpy(m.prefs.node_name, "zahrada-svetlo");
+  chanMsg(m, T + 31, "Jirka: LIGHT PRIKAZY");   CHECK(g_sent.size() == before + 3 && g_sent.back().delay == 600 + 4*1500, "svetlo bez cisla odpovi (5. okno)");
   strcpy(m.prefs.node_name, "svetlo-1");
 
   // --- upozorneni na baterii (jen do kanalu) ---
@@ -166,7 +194,7 @@ int main() {
   g_millis = 105000; lightTimerLoop(); CHECK(board.light_state == 0, "zdrzena smycka: zhasne presne po 5 s od LON");
   g_millis = 200000; cli(m, 0, "lon"); g_millis = 202000; lightTimerLoop();
   CHECK(cli(m, 0, "status").rfind("ON 3s bat=", 0) == 0, "STATUS ukazuje zbyvajici cas");
-  cli(m, 0, "loff"); lightTimerLoop(); CHECK(!light_timer_armed, "LOFF zrusi odpocet");
+  board.setGpio(0); lightTimerLoop(); CHECK(!light_timer_armed, "zhasnuti zrusi odpocet");
   CHECK(cli(m, 0, "chan 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").rfind("OK chan ON", 0) == 0, "chan 64 hex");
   uint8_t h1 = m.light_chan.hash[0];
   mesh::GroupChannel out[4];
@@ -180,6 +208,14 @@ int main() {
   uptime_ms = 0; uptime_last = 0;
   g_millis = 0; uptimeLoop(); g_millis = (uint32_t)((2*1440 + 3*60 + 4) * 60000UL); uptimeLoop();
   CHECK(cli(m, 0, "status").find("up=2d03h04m") != std::string::npos, "up format");
+
+  // --- BATKAL (spolecne s radarem) ---
+  board.mv = 3900;
+  CHECK(cli(m, 0, "batkal") == "batkal=1.000 bat=3.90V", "BATKAL vychozi");
+  CHECK(cli(m, 0, "BATKAL 4,00") == "batkal=1.026 bat=4.00V", "BATKAL podle multimetru");
+  CHECK(cli(m, 0, "status").find("bat=4.00V") != std::string::npos, "STATUS s korekci");
+  CHECK(cli(m, 0, "batkal 3.0").rfind("Err - BATKAL", 0) == 0, "BATKAL o vic nez 20 % odmitnut");
+  CHECK(cli(m, 1800300000, "batkal off") == "batkal=1.000 bat=3.90V", "BATKAL OFF i na dalku (admin)");
 
   printf("%d kontrol, %d chyb\n", checks, fails);
   return fails ? 1 : 0;
