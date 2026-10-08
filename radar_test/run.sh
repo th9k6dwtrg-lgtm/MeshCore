@@ -9,8 +9,8 @@ common = open('../examples/zahrada_common/ZahradaNode.h').read()
 body = src[src.index('#ifndef LIGHT_PULSE_SECS'):src.index('StdRNG fast_rng;')]
 open('extracted.h', 'w').write((common + body).replace('protected:', 'public:'))
 PY
-g++ -std=gnu++17 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I ../zahrada_test -o test test.cpp
+g++ -std=gnu++17 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I ../zahrada_test -DRADAR_STARTUP_SECS=30 -o test test.cpp
 ./test
-# znovu s ustalovanim 5 minut (jako ve finalni verzi)
+# znovu s vychozim ustalovanim 5 minut
 g++ -std=gnu++17 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -I ../zahrada_test -DRADAR_STARTUP_SECS=300 -o test test.cpp
 ./test

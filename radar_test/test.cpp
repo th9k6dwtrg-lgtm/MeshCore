@@ -311,7 +311,7 @@ int main() {
     CHECK(order, "zpravy tahaku po 3 s");
     CHECK(starts, "zpravy cislovane prikazy 1/4 ... 4/4");
     for (const char* c : {"\nRADAR ON - ", "\nRADAR OFF - ", "\nSVETLO ON - ", "\nSVETLO OFF - ", "\nRON - svetlo hned na 3 s",
-                          "\nSTATUS RADAR - ", "\nSTATUS - ", "\nRADAR KALIBRACE - na 15 min", "\nRADAR KALIBRACE 20m - ",
+                          "\nSTATUS RADAR - ", "\nSTATUS - ", "\nRADAR KALIBRACE - na 15 min", "\nRADAR KALIBRACE 20m - ", "\nRADAR KALIBRACE STOP - ",
                           "\nRADAR PRAHY - ", "\nRADAR PRAHY H - ", "\nRADAR PRAHY VYCHOZI - ", "\nRADAR PRIKAZY - ", "\nRON 2 = "})
       CHECK(all.find(c) != std::string::npos, (std::string("tahak obsahuje") + c).c_str());
     // tahak nikoho nespusti: radar ho ignoruje podle jmena, prvni slovo "prikazy" neni prikaz
@@ -418,6 +418,13 @@ int main() {
     }
     CHECK(cli(k, 0, "radar kalibrace 1m") == "Err - doba 2m az 60m", "kratka doba odmitnuta");
     CHECK(cli(k, 0, "radar kalibracex") == "<NEZPRACOVANO>", "preklep neni prikaz");
+
+    // RADAR KALIBRACE STOP pred skenem: radar beze zmeny
+    CHECK(cli(k, 0, "radar kalibrace stop") == "KALIBRACE nebezi", "STOP bez kalibrace");
+    cli(k, 0, "radar kalibrace");
+    CHECK(cli(k, 0, "RADAR KALIBRACE STOP") == "KALIBRACE zrusena (radar beze zmeny)" && k.kal_state == MyMesh::KAL_IDLE, "STOP behem cekani zrusi kalibraci");
+    radar_uart.auto_scan = -1; g_millis = k.kal_t0 + 70000; k.radarKalLoop();
+    CHECK(radar_uart.auto_scan == -1, "po STOP se sken nespusti");
 
     g_sent.clear();
     uint32_t t0 = g_millis;
@@ -641,6 +648,30 @@ int main() {
     size_t n0 = g_sent.size();
     chanMsg(c, 1950000000, "Jirka: PAUZA 10");
     CHECK(g_sent.size() == n0 && c.cooldown_secs == 120, "PAUZA z kanalu nejde");
+  }
+
+  // --- RADAR KALIBRACE STOP behem skenu: po skenu se vrati puvodni prahy ---
+  {
+    MyMesh q(mb, mr, mc, rg, rc, mt);
+    strcpy(q.prefs.node_name, "RADAR 1");
+    q.applyChannelSecret((const uint8_t*)"0123456789abcdef0123456789abcdef");
+    radar_uart.alive = true; radar_uart.auto_scan = -1;
+    uint8_t keep_t[16], keep_h[16]; memcpy(keep_t, radar_uart.trig, 16); memcpy(keep_h, radar_uart.hold, 16);
+    radar_uart.trig[0] = 50; radar_uart.hold[3] = 30;            // prahy pred kalibraci
+    g_millis = 70000000; g_sent.clear();
+    chanMsg(q, 1960000000, "Jirka: RADAR KALIBRACE 2m");
+    g_millis = q.kal_t0 + 60000; q.radarKalLoop();
+    CHECK(q.kal_state == MyMesh::KAL_SCAN && radar_uart.auto_scan == 120, "sken bezi");
+    radar_uart.trig[0] = 20; radar_uart.hold[3] = 10;            // radar si behem skenu nastavil nove prahy
+    chanMsg(q, 1960000001, "Jirka: RADAR KALIBRACE STOP 1");
+    CHECK(g_sent.back().text == "RADAR 1: KALIBRACE STOP: radar dokonci sken (asi 2 min), pak vratim puvodni prahy" &&
+          g_sent.back().text.size() <= 139 && q.kal_stop, "STOP behem skenu (kanal, s cislem)");
+    radar_uart.progress(100); q.radarKalLoop();
+    g_millis = q.kal_done + RADAR_KAL_GRACE_MS; q.radarKalLoop();
+    CHECK(q.kal_state == MyMesh::KAL_IDLE && !q.kal_stop, "po skenu konec kalibrace");
+    CHECK(radar_uart.trig[0] == 50 && radar_uart.hold[3] == 30, "puvodni prahy vraceny do radaru");
+    CHECK(g_sent.back().text == "RADAR 1: kalibrace zrusena, puvodni prahy vraceny", "zprava o zrusene kalibraci");
+    memcpy(radar_uart.trig, keep_t, 16); memcpy(radar_uart.hold, keep_h, 16);
   }
 
   // --- hlidani funkcnosti radaru: UART kazdych 6 h, OT2 trvale v pritomnosti ---

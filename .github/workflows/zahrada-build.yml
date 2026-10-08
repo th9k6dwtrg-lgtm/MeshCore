@@ -6,6 +6,7 @@ on:
   workflow_dispatch:          # rucni spusteni tlacitkem "Run workflow"
   push:
     branches: [zahradni-svetlo, radar-alarm]
+    tags: ['zahrada-v*']       # vydani (napr. zahrada-v1.0)
 
 jobs:
   build:

@@ -42,7 +42,6 @@ protected:
   // Zahradni svetlo. Prikazy (velikost pismen nehraje roli):
   //   LON     -> svetlo sviti LIGHT_ON_SECS sekund (vychozi 5 s), pak samo zhasne; odpoved "ON 5s c.3 bat=3.95V"
   //              (c. = poradove cislo rozsviceni od zapnuti uzlu)
-  //   LOFF    -> svetlo hned zhasne
   //   STATUS  -> stav + napeti baterie + sila signalu posledniho prijateho paketu + doba behu od startu
   //   LIGHT PRIKAZY -> (jen v kanalu) tahak prikazu, kazdy na svem radku; odpovi svetlo 1 (LIGHT PRIKAZY 2 = svetlo 2)
   //   WDTTEST -> (jen USB) zamerne zasekne firmware -> overeni, ze se uzel sam restartuje
@@ -57,18 +56,13 @@ protected:
   //       "LON 1 3"  -> svetla 1 a 3
   //     Kazdy uzel odpovi do kanalu "<jmeno>: <stav>", s rozestupem podle sveho cisla.
 
-  // provede LON / LOFF / STATUS; cmd uz je malymi pismeny a bez parametru
+  // provede LON / STATUS; cmd uz je malymi pismeny a bez parametru (LOFF uz neni, svetlo zhasne samo)
   bool execLight(const char* cmd, char* reply) {
     if (strcmp(cmd, "lon") == 0) {
       lightTimerStart();                  // (znovu) spustit odpocet
       board.setGpio(board.getGpio() | 1);
       light_seq++;                        // poradove cislo rozsviceni od zapnuti uzlu (jen v RAM)
       sprintf(reply, "ON %ds c.%u bat=%.2fV", LIGHT_ON_SECS, (unsigned)light_seq, battVolts());
-      return true;
-    }
-    if (strcmp(cmd, "loff") == 0) {
-      board.setGpio(board.getGpio() & ~1u);
-      strcpy(reply, "OFF");
       return true;
     }
     if (strcmp(cmd, "status") == 0) {
@@ -125,7 +119,7 @@ protected:
     // "LIGHT PRIKAZY" = tahak prikazu; bez cisla odpovi jen svetlo 1 (nebo svetlo bez cisla), "LIGHT PRIKAZY 2" svetlo 2
     bool prikazy = strcmp(word, "light") == 0 && t != NULL && isPrikazy(t);
     if (prikazy) t = strtok_r(NULL, " ,", &save);
-    else if (strcmp(word, "lon") && strcmp(word, "loff") && strcmp(word, "status")) return;  // neni pro nas (napr. odpovedi ostatnich svetel)
+    else if (strcmp(word, "lon") && strcmp(word, "status")) return;  // neni pro nas (napr. odpovedi ostatnich svetel)
 
     int me = nodeNumber();
     bool for_me = !prikazy || me <= 1;
@@ -144,7 +138,6 @@ protected:
     if (prikazy) {
       static const char* const lines[] = {
         "LON - svetlo na " ZSTR(LIGHT_ON_SECS) " s",
-        "LOFF - zhasnout",
         "STATUS - stav vsech uzlu",
         "LIGHT PRIKAZY - tento seznam",
         "LON 2 = jen svetlo 2",

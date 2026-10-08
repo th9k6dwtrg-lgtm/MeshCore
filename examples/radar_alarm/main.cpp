@@ -23,7 +23,7 @@
 #define ALARM_COOLDOWN_MS  ((uint32_t)ALARM_COOLDOWN_SECS * 1000UL)
 
 #ifndef RADAR_STARTUP_SECS
-  #define RADAR_STARTUP_SECS  30  // po startu uzlu (a radaru) se pohyb nevyhodnocuje: radar se ustaluje
+  #define RADAR_STARTUP_SECS  300 // po startu uzlu (a radaru) se pohyb nevyhodnocuje: radar se ustaluje (5 min)
 #endif
 #define RADAR_STARTUP_MS  ((uint32_t)RADAR_STARTUP_SECS * 1000UL)
 #define RADAR_READY_WARN_SECS  60 // zprava "pripraven za 60 s" (jen kdyz je ustalovani delsi nez 60 s)
@@ -275,6 +275,8 @@ public:
                     (uint8_t)(scan_secs & 0xFF), (uint8_t)(scan_secs >> 8)};
     if (!configOn()) return false;
     saved_ok = readParams(saved);
+    // prahy pred kalibraci: RADAR KALIBRACE STOP je po skenu vrati
+    saved_thr_ok = readThresholds(0x0073, saved_t) && readThresholds(0x0077, saved_h);
     bool ok = command(0x0009, d, sizeof(d));
     configOff();   // prubeh radar posila az mimo konfiguracni rezim
     return ok;
@@ -310,6 +312,16 @@ public:
   }
   uint32_t saved[LD_NPARAMS];   // obecne parametry pred kalibraci
   bool saved_ok = false;
+  uint8_t saved_t[LD_GATES], saved_h[LD_GATES];   // prahy sepnuti a udrzeni pred kalibraci
+  bool saved_thr_ok = false;
+
+  // zapise prahy sepnuti i udrzeni (napr. puvodni po zrusene kalibraci)
+  bool writeAll(const uint8_t t[LD_GATES], const uint8_t h[LD_GATES]) {
+    if (!configOn()) return false;
+    bool ok = writeThresholds(0x0072, t) && writeThresholds(0x0076, h);
+    configOff();
+    return ok;
+  }
 
   // po kalibraci vrati obecne parametry, ktere radar zmenil; vraci pocet vracenych, -1 = chyba
   int restoreParams() {
@@ -416,6 +428,7 @@ protected:
   uint16_t kal_minutes = RADAR_KAL_MINUTES;
   uint32_t kal_done = 0;          // millis() hlaseni 100 % (0 = zatim ne)
   uint8_t kal_tries = 0;          // neuspesne pokusy o cteni prahu po skenu
+  bool kal_stop = false;          // RADAR KALIBRACE STOP behem skenu: po skenu vratit puvodni prahy
   uint32_t kal_retry_t = 0;       // millis() posledniho neuspesneho pokusu
   bool uart_quiet = false;        // chvili po UART komunikaci s radarem se OT2 nevyhodnocuje
   uint32_t uart_quiet_t = 0;
@@ -585,9 +598,20 @@ public:
     int far_gate = LD_GATES - 1;
     bool ok = ld.readAll(t, h, far_gate);
     if (!ok && ++kal_tries < RADAR_KAL_TRIES) { kal_retry_t = millis(); return; }   // dalsi pokus za 10 s
+    if (ok && kal_stop) {   // zrusena kalibrace: radar sken dokoncil, vratit prahy a parametry z doby pred ni
+      bool back = ld.saved_thr_ok && ld.writeAll(ld.saved_t, ld.saved_h);
+      ld.restoreParams();
+      ld.end(); uartDone();
+      kal_state = KAL_IDLE;
+      kal_stop = false;
+      sendChannelText(back ? "kalibrace zrusena, puvodni prahy vraceny"
+                           : "kalibrace zrusena, puvodni prahy nejde vratit - RADAR PRAHY VYCHOZI", slotDelay());
+      return;
+    }
     int restored = ok ? ld.restoreParams() : 0;
     ld.end(); uartDone();
     kal_state = KAL_IDLE;
+    kal_stop = false;
     if (!ok) { sendChannelText("kalibrace CHYBA: radar neodpovida, vypni a zapni uzel", slotDelay()); return; }
     // jedna srozumitelna veta v metrech, napr. "kalibrace OK: sepnuti citlivejsi o 1-5 (12 bran), mene citlive o 3
     // (0,7-1,4 m); udrzeni ..."; cisla po branach vrati RADAR PRAHY. Nevejde-li se do jedne zpravy, jdou dve.
@@ -617,6 +641,18 @@ public:
 protected:
   bool execKalibrace(const char* cmd, char* reply) {
 #ifdef PIN_RADAR_UART_RX
+    // RADAR KALIBRACE STOP: pred skenem zrusi hned; sken radar zastavit neumi, po nem se vrati puvodni prahy
+    if (strcmp(cmd, "radar kalibrace stop") == 0) {
+      if (kal_state == KAL_IDLE) strcpy(reply, "KALIBRACE nebezi");
+      else if (kal_state == KAL_WAIT) { kal_state = KAL_IDLE; strcpy(reply, "KALIBRACE zrusena (radar beze zmeny)"); }
+      else {
+        kal_stop = true;
+        uint32_t el_min = (uint32_t)(millis() - kal_t0) / 60000UL;
+        unsigned left = el_min < (uint32_t)kal_minutes ? (unsigned)(kal_minutes - el_min) : 1;
+        sprintf(reply, "KALIBRACE STOP: radar dokonci sken (asi %u min), pak vratim puvodni prahy", left);
+      }
+      return true;
+    }
     if (strncmp(cmd, "radar kalibrace", 15) == 0) {
       if (kal_state != KAL_IDLE) { strcpy(reply, "KALIBRACE uz bezi"); return true; }
       int mins = RADAR_KAL_MINUTES;
@@ -844,6 +880,7 @@ protected:
 #ifdef PIN_RADAR_UART_RX
       "RADAR KALIBRACE - na " ZSTR(RADAR_KAL_MINUTES) " min",
       "RADAR KALIBRACE 20m - na 20 min",
+      "RADAR KALIBRACE STOP - zrusit",
       "RADAR PRAHY - prahy sepnuti",
       "RADAR PRAHY H - prahy udrzeni",
       "RADAR PRAHY VYCHOZI - tovarni prahy",
@@ -873,7 +910,8 @@ protected:
       snprintf(action, sizeof(action), "radar %s", t);
       t = strtok_r(NULL, " ,", &save);
       int tl = t ? strlen(t) : 0;
-      bool kal_time = tl >= 2 && t[tl - 1] == 'm' && isdigit((unsigned char)t[0]) && strcmp(action, "radar kalibrace") == 0;
+      bool kal_time = strcmp(action, "radar kalibrace") == 0 && t &&
+                      ((tl >= 2 && t[tl - 1] == 'm' && isdigit((unsigned char)t[0])) || strcmp(t, "stop") == 0);
       bool prahy_arg = t && strcmp(action, "radar prahy") == 0 &&
                        (strcmp(t, "h") == 0 || strcmp(t, "vychozi") == 0 || strcmp(t, "výchozí") == 0 || strcmp(t, "reset") == 0);
       if (kal_time || prahy_arg) {
@@ -896,7 +934,7 @@ protected:
       strcpy(action, "status");
       t = strtok_r(NULL, " ,", &save);
     } else {
-      return;   // neni pro nas (LON/LOFF svetel, odpovedi ostatnich uzlu, bezne zpravy)
+      return;   // neni pro nas (LON svetel, odpovedi ostatnich uzlu, bezne zpravy)
     }
 
     int me = nodeNumber();
