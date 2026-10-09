@@ -6,6 +6,9 @@ on:
     branches:
       - m1-cz-repeat
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -26,3 +29,14 @@ jobs:
         with:
           name: ThinkNode_M1_companion_radio_ble-czrepeat
           path: out
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: m1-companion-v1.17.1-czrepeat
+          target_commitish: ${{ github.sha }}
+          name: "ThinkNode M1 Companion v1.17.1 + CZ client repeat"
+          body: "Companion firmware v1.17.1 for ThinkNode M1 (BLE). Client repeat is also allowed on the Czech Republic (Narrow) preset 869.432 MHz."
+          prerelease: true
+          make_latest: false
+          files: out/*
