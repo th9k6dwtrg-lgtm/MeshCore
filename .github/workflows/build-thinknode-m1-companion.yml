@@ -2,6 +2,9 @@ name: Build ThinkNode M1 Companion (CZ repeat)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - m1-cz-repeat
 
 jobs:
   build:
