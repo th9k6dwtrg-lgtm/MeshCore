@@ -1001,6 +1001,7 @@ static FreqRange repeat_freq_ranges[] = {
   ALLOWED_REPEAT_FREQ_RANGE
   #else
   { 433000, 433000 },
+  { 869431, 869433 },  // Czech Republic (Narrow) preset 869.432 MHz (+/-1 kHz for app float rounding)
   { 869495, 869495 },
   { 918000, 918000 }
   #endif
