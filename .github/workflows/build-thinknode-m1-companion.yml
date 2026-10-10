@@ -33,9 +33,9 @@ jobs:
       - name: Publish Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: m1-companion-v1.17.1-czrepeat
+          tag_name: m1-companion-v1.17.1-czrepeat-build${{ github.run_number }}
           target_commitish: ${{ github.sha }}
-          name: "ThinkNode M1 Companion v1.17.1 + CZ client repeat"
+          name: "ThinkNode M1 Companion v1.17.1 + CZ repeat (build ${{ github.run_number }})"
           body: "Companion firmware v1.17.1 for ThinkNode M1 (BLE). Client repeat is also allowed on the Czech Republic (Narrow) preset 869.432 MHz."
           prerelease: true
           make_latest: false
